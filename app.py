@@ -3,117 +3,139 @@ import pandas as pd
 from datetime import datetime, time
 
 # --- CONFIGURAÇÕES ---
-st.set_page_config(page_title="Controle de Banco de Horas", layout="centered")
+st.set_page_config(page_title="Controle de Banco de Horas - Limite 36h", layout="centered")
 
-# --- LÓGICA DE CÁLCULO ---
+# --- FUNÇÕES DE CÁLCULO ---
 
 def calcular_horas_positivas(data, entrada, saida, descontar_almoco):
     t1 = datetime.combine(data, entrada)
     t2 = datetime.combine(data, saida)
-    diff = t2 - t1
+    diff = (t2 - t1).total_seconds() / 3600
+    if descontar_almoco: diff -= 1
     
-    total_segundos = diff.total_seconds()
-    if descontar_almoco:
-        total_segundos -= 3600  # -1 hora
-    
-    horas_decimais = max(0, total_segundos / 3600)
-
-    # Regra do Sábado (Multiplicador 1.5)
+    # Regra do Sábado (1.5x)
     if data.weekday() == 5: 
-        horas_decimais *= 1.5
+        diff *= 1.5
+    return max(0, diff)
 
-    return horas_decimais
-
-def calcular_debito_folga(data, inteira=False, entrada=None, saida=None, almoco=False):
+def calcular_debito_folga(data, inteira, entrada=None, saida=None, almoco=False):
     if inteira:
-        dia_semana = data.weekday()  # 0=Segunda, 4=Sexta
-        if dia_semana <= 3:          # Segunda a Quinta
-            return -9.0
-        elif dia_semana == 4:        # Sexta
-            return -8.0
-        else:
-            return 0.0               # Sáb/Dom (ajustar se necessário)
+        # Segunda a Quinta (0-3) = 9h | Sexta (4) = 8h
+        return 9.0 if data.weekday() <= 3 else 8.0
     else:
-        # Cálculo para saída antecipada ou atraso (parcial)
         t1 = datetime.combine(data, entrada)
         t2 = datetime.combine(data, saida)
-        diff = t2 - t1
-        total_segundos = diff.total_seconds()
-        if almoco:
-            total_segundos -= 3600
-        return -(total_segundos / 3600)
+        diff = (t2 - t1).total_seconds() / 3600
+        if almoco: diff -= 1
+        return max(0, diff)
 
-# --- INTERFACE ---
-
+# --- LOGIN ---
 if 'logado' not in st.session_state:
     st.session_state.logado = False
 
-# (Omitindo bloco de login para focar na nova lógica, mas ele permanece igual)
 if not st.session_state.logado:
-    st.session_state.logado = True # Apenas para visualização neste exemplo
-    st.session_state.usuario = "Denise"
+    st.title("🔐 Login de Usuário")
+    user = st.text_input("Usuário")
+    pwd = st.text_input("Senha", type="password")
+    if st.button("Entrar"):
+        if user and pwd: # Simplificação: qualquer user/pass entra para teste
+            st.session_state.logado = True
+            st.session_state.usuario = user
+            st.rerun()
+    st.stop()
 
-if 'db_horas' not in st.session_state:
-    st.session_state.db_horas = pd.DataFrame(columns=["Data", "Tipo", "Horas"])
+# --- BANCO DE DADOS (SIMULADO) ---
+if 'df_banco' not in st.session_state:
+    # Criando colunas para separar o que é crédito e o que é débito
+    st.session_state.df_banco = pd.DataFrame(columns=["usuario", "data", "tipo", "horas"])
 
-saldo_atual = st.session_state.db_horas["Horas"].sum()
+# Filtrar dados do usuário atual
+df_user = st.session_state.df_banco[st.session_state.df_banco['usuario'] == st.session_state.usuario]
 
-st.title(f"Controle de Horas - {st.session_state.usuario}")
-tab1, tab2, tab3 = st.tabs(["➕ Horas Positivas", "➖ Horas Negativas", "📊 Saldo e Extrato"])
+# Calcular Totais Acumulados (A REGRA DOS 36H)
+total_creditos_cadastrados = df_user[df_user['tipo'] == "Crédito"]['horas'].sum()
+total_debitos_cadastrados = df_user[df_user['tipo'] == "Débito"]['horas'].sum()
+saldo_atual = total_creditos_cadastrados - total_debitos_cadastrados
 
-# --- ABA 1: POSITIVAS ---
+# --- INTERFACE ---
+st.title("Controle de Banco de Horas")
+st.sidebar.write(f"Usuário: **{st.session_state.usuario}**")
+
+tab1, tab2, tab3 = st.tabs(["➕ Lançar Crédito", "➖ Lançar Débito", "📊 Saldo e Extrato"])
+
+# ABA 1: CRÉDITOS
 with tab1:
-    with st.form("form_positivo"):
-        data_p = st.date_input("Data do Lançamento")
-        col1, col2 = st.columns(2)
-        ent_p = col1.time_input("Entrada", value=time(8, 0))
-        sai_p = col2.time_input("Saída", value=time(17, 0))
-        almoco_p = st.checkbox("Descontar Almoço?", value=True)
-        
-        if st.form_submit_button("Registrar Crédito"):
-            h_calc = calcular_horas_positivas(data_p, ent_p, sai_p, almoco_p)
-            
-            if saldo_atual + h_calc > 36:
-                h_calc = 36 - saldo_atual
-                st.warning("Limite de 36h atingido. Lançamento limitado ao saldo máximo.")
-            
-            if h_calc > 0:
-                nova = pd.DataFrame([{"Data": data_p, "Tipo": "Positivo", "Horas": h_calc}])
-                st.session_state.db_horas = pd.concat([st.session_state.db_horas, nova], ignore_index=True)
-                st.success(f"Crédito de {h_calc:.2f}h registrado!")
+    st.subheader("Lançamento de Horas Extras")
+    restante_credito = 36 - total_creditos_cadastrados
+    st.info(f"Você ainda pode lançar: **{max(0, restante_credito):.2f}h** de crédito no total.")
 
-# --- ABA 2: NEGATIVAS (COM A NOVA REGRA) ---
+    if restante_credito <= 0:
+        st.error("Limite máximo de 36h de crédito atingido. Não é possível realizar mais horas para o banco.")
+    else:
+        with st.form("f_pos"):
+            data = st.date_input("Data")
+            c1, c2 = st.columns(2)
+            ent = c1.time_input("Entrada", value=time(8,0))
+            sai = c2.time_input("Saída", value=time(17,0))
+            alm = st.checkbox("Descontar Almoço?", value=True)
+            
+            if st.form_submit_button("Registrar Crédito"):
+                h = calcular_horas_positivas(data, ent, sai, alm)
+                
+                if h > restante_credito:
+                    st.warning(f"Lançamento ajustado de {h:.2f}h para {restante_credito:.2f}h para respeitar o limite de 36h.")
+                    h = restante_credito
+                
+                novo = pd.DataFrame([{"usuario": st.session_state.usuario, "data": data, "tipo": "Crédito", "horas": h}])
+                st.session_state.df_banco = pd.concat([st.session_state.df_banco, novo], ignore_index=True)
+                st.success(f"Crédito de {h:.2f}h registrado!")
+                st.rerun()
+
+# ABA 2: DÉBITOS
 with tab2:
-    tipo_folga = st.radio("Tipo de débito:", ["Dia Inteiro", "Parcial (Atraso/Saída Cedo)"])
-    
-    with st.form("form_negativo"):
-        data_n = st.date_input("Data da Folga/Atraso")
-        h_debito = 0
-        
-        if tipo_folga == "Parcial (Atraso/Saída Cedo)":
-            col1, col2 = st.columns(2)
-            ent_n = col1.time_input("Início do período", value=time(8, 0))
-            sai_n = col2.time_input("Fim do período", value=time(12, 0))
-            almoco_n = st.checkbox("Descontar Almoço?", value=False)
-        
-        if st.form_submit_button("Registrar Débito"):
-            if tipo_folga == "Dia Inteiro":
-                h_debito = calcular_debito_folga(data_n, inteira=True)
-            else:
-                h_debito = calcular_debito_folga(data_n, inteira=False, entrada=ent_n, saida=sai_n, almoco=almoco_n)
+    st.subheader("Lançamento de Folgas/Atrasos")
+    restante_debito = 36 - total_debitos_cadastrados
+    st.info(f"Você ainda pode debitar: **{max(0, restante_debito):.2f}h** no total.")
+
+    if restante_debito <= 0:
+        st.error("Limite máximo de 36h de débito atingido.")
+    else:
+        modo = st.radio("Tipo:", ["Folga Inteira", "Parcial"])
+        with st.form("f_neg"):
+            data_n = st.date_input("Data do Débito")
+            h_deb = 0
+            if modo == "Parcial":
+                c1, c2 = st.columns(2)
+                ent_n = c1.time_input("Início", value=time(8,0))
+                sai_n = c2.time_input("Fim", value=time(12,0))
+                alm_n = st.checkbox("Descontar Almoço?", value=False)
             
-            # Validação do Limite de -36h
-            if saldo_atual + h_debito < -36:
-                h_debito = -36 - saldo_atual
-                st.warning("Limite negativo de -36h atingido.")
+            if st.form_submit_button("Registrar Débito"):
+                if modo == "Folga Inteira":
+                    h_deb = calcular_debito_folga(data_n, True)
+                else:
+                    h_deb = calcular_debito_folga(data_n, False, ent_n, sai_n, alm_n)
+                
+                if h_deb > restante_debito:
+                    st.warning(f"Débito ajustado para {restante_debito:.2f}h para não ultrapassar o limite de 36h.")
+                    h_deb = restante_debito
+                
+                novo = pd.DataFrame([{"usuario": st.session_state.usuario, "data": data_n, "tipo": "Débito", "horas": h_deb}])
+                st.session_state.df_banco = pd.concat([st.session_state.df_banco, novo], ignore_index=True)
+                st.success(f"Débito de {h_deb:.2f}h registrado!")
+                st.rerun()
 
-            if h_debito != 0:
-                nova = pd.DataFrame([{"Data": data_n, "Tipo": "Negativo", "Horas": h_debito}])
-                st.session_state.db_horas = pd.concat([st.session_state.db_horas, nova], ignore_index=True)
-                st.success(f"Débito de {abs(h_debito):.2f}h registrado!")
-
-# --- ABA 3: SALDO ---
+# ABA 3: SALDO E EXTRATO
 with tab3:
-    st.metric("Saldo Acumulado", f"{saldo_atual:.2f} h", delta_color="normal")
-    if st.button("Ver Extrato"):
-        st.table(st.session_state.db_horas)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Créditos (Max 36h)", f"{total_creditos_cadastrados:.2f}h")
+    col2.metric("Total Débitos (Max 36h)", f"{total_debitos_cadastrados:.2f}h")
+    col3.metric("Saldo Atual", f"{saldo_atual:.2f}h")
+    
+    st.divider()
+    if st.button("Gerar Extrato"):
+        st.dataframe(df_user, use_container_width=True)
+
+if st.sidebar.button("Logoff"):
+    st.session_state.logado = False
+    st.rerun()
