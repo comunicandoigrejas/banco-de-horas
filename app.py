@@ -20,6 +20,7 @@ def realizar_login():
             if botao_entrar:
                 # Busca a lista de usuários na aba "Usuarios"
                 try:
+                     df_usuarios = conn.read(worksheet="Usuarios", ttl=0)
                                        
                     # Verifica se o usuário e senha batem
                     usuario_valido = df_usuarios[
