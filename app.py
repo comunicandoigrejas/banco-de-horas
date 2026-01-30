@@ -80,7 +80,7 @@ saldo_banco_disponivel = 0
 horas_extras_pagas = 0
 
 if not df_user.empty:
-    df_user['data_dt'] = pd.to_datetime(df_user['data'], format='%d/%m/%Y')
+    df_user['data_dt'] = pd.to_datetime(df_user['data'], format='yyyy-mm-dd')
     df_user = df_user.sort_values('data_dt')
     
     for _, row in df_user.iterrows():
