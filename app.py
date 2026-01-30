@@ -4,14 +4,14 @@ import pandas as pd
 from datetime import datetime, time
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="ISOSED - Banco Fixo e Horas Extras", layout="centered")
+st.set_page_config(page_title="Banco de Horas e Extras", layout="centered")
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- FUNÇÕES DE IMPOSTOS ---
-def calcular_imposto_total(valor_bruto):
-    """INSS e IRPF Progressivo 2026."""
+# --- FUNÇÕES FINANCEIRAS ---
+def calcular_impostos(valor_bruto):
+    """Cálculo de INSS e IRPF (Tabelas 2026)."""
     inss = 0
-    faixas_inss = [(1518.00, 0.075), (2800.00, 0.09), (4200.00, 0.12), (8157.00, 0.14)]
+    faixas_inss = [(1518.0, 0.075), (2800.0, 0.09), (4200.0, 0.12), (8157.0, 0.14)]
     anterior = 0
     for limite, aliquota in faixas_inss:
         if valor_bruto > limite:
@@ -29,7 +29,6 @@ def calcular_imposto_total(valor_bruto):
     elif base_irpf > 2259.20: irpf = (base_irpf * 0.075) - 169.44
     return inss + max(0, irpf)
 
-# --- FUNÇÕES DE DADOS ---
 def buscar_dados(aba):
     return conn.read(worksheet=aba, ttl=0)
 
@@ -44,7 +43,7 @@ def calcular_horas_trabalhadas(data, entrada, saida, almoco, tipo="positivo"):
     brutas = max(0, diff)
     
     if tipo == "positivo":
-        if data.weekday() <= 4: # Semana: 1.25x (Limite 2h finais por dia)
+        if data.weekday() <= 4: # Semana: 1.25x (Limite 2h finais)
             return min(brutas * 1.25, 2.0)
         elif data.weekday() == 5: # Sábado: 1.5x
             return brutas * 1.5
@@ -53,8 +52,8 @@ def calcular_horas_trabalhadas(data, entrada, saida, almoco, tipo="positivo"):
 # --- LOGIN ---
 if 'logado' not in st.session_state: st.session_state.logado = False
 if not st.session_state.logado:
-    st.title("🔐 Login de Acesso")
-    with st.form("login"):
+    st.title("🔐 Login ISOSED")
+    with st.form("l"):
         u = st.text_input("Usuário").lower().strip()
         p = st.text_input("Senha", type="password")
         if st.form_submit_button("Entrar"):
@@ -64,60 +63,59 @@ if not st.session_state.logado:
                 st.session_state.logado, st.session_state.usuario = True, u
                 st.session_state.nome = valid.iloc[0]['nome_exibicao']
                 st.rerun()
-            else: st.error("Erro de Login")
+            else: st.error("Acesso Negado")
     st.stop()
 
-# --- SIDEBAR ---
-# --- CARREGAMENTO E LOGICA DE LIMITE ---
-v_hora = st.sidebar.number_input("Valor Hora (R$)", min_value=0.0, value=25.0)
+# --- INPUT FINANCEIRO ---
+v_hora = st.sidebar.number_input("Valor da Hora (R$)", min_value=0.0, value=25.0)
 salario_base = v_hora * 220
 
-# Chamada corrigida: de buscar_data para buscar_dados
-df_todos = buscar_dados("Lancamentos") 
+# --- LÓGICA DA COTA FIXA DE 36H ---
+df_todos = buscar_dados("Lancamentos")
 df_user = df_todos[df_todos['usuario'] == st.session_state.usuario].copy()
 
-total_creditos_na_vida = 0
-saldo_banco_disponivel = 0
-horas_extras_pagas = 0
+cota_acumulada_creditos = 0 # Esta só sobe até 36 e trava
+saldo_para_folgas = 0      # Este sobe (até a cota 36) e desce (folgas)
+horas_para_pagamento = 0   # Tudo o que transborda da cota acumulada
 
 if not df_user.empty:
-    # Tratamento robusto de datas para evitar o erro anterior
     df_user['data_dt'] = pd.to_datetime(df_user['data'], dayfirst=True, errors='coerce')
-    df_user = df_user.dropna(subset=['data_dt'])
-    df_user = df_user.sort_values('data_dt')
+    df_user = df_user.dropna(subset=['data_dt']).sort_values('data_dt')
     
     for _, row in df_user.iterrows():
         if row['tipo'] == "Crédito":
-            if total_creditos_na_vida < 36:
-                vaga_no_banco = 36 - total_creditos_na_vida
-                ao_banco = min(row['horas'], vaga_no_banco)
-                saldo_banco_disponivel += ao_banco
-                horas_extras_pagas += max(0, row['horas'] - vaga_no_banco)
-                total_creditos_na_vida += row['horas']
+            if cota_acumulada_creditos < 36:
+                vaga_na_cota = 36 - cota_acumulada_creditos
+                ao_banco = min(row['horas'], vaga_na_cota)
+                
+                cota_acumulada_creditos += ao_banco
+                saldo_para_folgas += ao_banco
+                
+                # O que sobrar desse lançamento individual já vira dinheiro
+                horas_para_pagamento += max(0, row['horas'] - vaga_na_cota)
             else:
-                horas_extras_pagas += row['horas']
-                total_creditos_na_vida += row['horas']
+                # Cota de 36h já atingida. Qualquer crédito novo é DINHEIRO.
+                horas_para_pagamento += row['horas']
         elif row['tipo'] == "Débito":
-            saldo_banco_disponivel -= row['horas']
-            
-# --- CÁLCULO FINANCEIRO ---
-# Hora Extra 110% (Valor * 2.1)
-bruto_extras = horas_extras_pagas * (v_hora * 2.1)
-total_bruto_mensal = salario_base + bruto_extras
+            # Débitos (folgas) diminuem o saldo, mas NÃO liberam a cota de crédito
+            saldo_para_folgas -= row['horas']
 
-imp_base = calcular_imposto_total(salario_base)
-imp_total = calcular_imposto_total(total_bruto_mensal)
-imposto_das_extras = imp_total - imp_base
-liquido_extras = bruto_extras - imposto_das_extras
+# --- CÁLCULO FINANCEIRO ---
+bruto_extras = horas_para_pagamento * (v_hora * 2.1) # 110%
+imp_base = calcular_impostos(salario_base)
+imp_total = calcular_impostos(salario_base + bruto_extras)
+liquido_extras = bruto_extras - (imp_total - imp_base)
 
 # --- INTERFACE ---
-st.title("ISOSED - Gestão de Ponto")
-tab1, tab2, tab3 = st.tabs(["➕ Créditos", "➖ Débitos", "💰 Extrato & Financeiro"])
+st.title("ISOSED - Banco e Horas Extras")
+tab1, tab2, tab3 = st.tabs(["➕ Créditos", "➖ Folgas", "📊 Extrato"])
 
 with tab1:
-    st.info(f"Cota de Banco utilizada: **{min(36.0, total_creditos_na_vida):.2f} / 36.00h**")
-    if total_creditos_na_vida >= 36:
-        st.warning("⚠️ Cota de 36h de banco esgotada. Novos créditos serão pagos como Horas Extras.")
+    st.write(f"Cota de Crédito Utilizada: **{cota_acumulada_creditos:.2f} / 36.00h**")
+    st.progress(min(1.0, cota_acumulada_creditos / 36))
+    
+    if cota_acumulada_creditos >= 36:
+        st.warning("💰 Cota de banco atingida. Seus próximos créditos serão pagos em R$.")
     
     with st.form("f_c"):
         d = st.date_input("Data")
@@ -135,21 +133,20 @@ with tab1:
 
 with tab2:
     st.subheader("Registrar Folga")
+    st.info(f"Saldo disponível para folga: **{saldo_para_folgas:.2f}h**")
     modo = st.radio("Tipo:", ["Dia Inteiro", "Parcial"])
     with st.form("f_d"):
-        d_n = st.date_input("Data do Débito")
+        d_n = st.date_input("Data")
         h_d, e_v, s_v = 0, "-", "-"
         if modo == "Parcial":
             c1, c2 = st.columns(2)
             en_n, sa_n = c1.time_input("Início", value=time(8,0), step=300), c2.time_input("Fim", value=time(12,0), step=300)
-            al_n = st.checkbox("Descontar Almoço?", value=False)
             e_v, s_v = en_n.strftime("%H:%M"), sa_n.strftime("%H:%M")
-        
-        if st.form_submit_button("Confirmar Débito"):
+        if st.form_submit_button("Registrar Débito"):
             if modo == "Dia Inteiro":
                 h_d = 9.0 if d_n.weekday() <= 3 else 8.0
                 e_v, s_v = "Folga", "Integral"
-            else: h_d = calcular_horas_trabalhadas(d_n, en_n, sa_n, al_n, "negativo")
+            else: h_d = calcular_horas_trabalhadas(d_n, en_n, sa_n, False, "negativo")
             novo = pd.DataFrame([{"usuario": st.session_state.usuario, "data": d_n.strftime("%d/%m/%Y"), 
                                   "entrada": e_v, "saida": s_v, "tipo": "Débito", "horas": h_d}])
             salvar_dados(pd.concat([df_todos, novo], ignore_index=True))
@@ -157,25 +154,14 @@ with tab2:
 
 with tab3:
     st.subheader("💰 Resumo Financeiro")
-    col1, col2, col3 = st.columns(3)
-    # Mostra o saldo de folgas (que pode ser negativo)
-    col1.metric("Saldo Banco (Folgas)", f"{saldo_banco_disponivel:.2f}h")
-    col2.metric("Líquido Extra (110%)", f"R$ {liquido_extras:,.2f}")
-    col3.metric("Impostos Retidos", f"R$ {imposto_das_extras:,.2f}")
-
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Saldo Folgas", f"{saldo_para_folgas:.2f}h")
+    c2.metric("Líquido Extras", f"R$ {liquido_extras:,.2f}")
+    c3.metric("Horas em R$", f"{horas_para_pagamento:.2f}h")
+    
     st.divider()
     if not df_user.empty:
         st.dataframe(df_user[["data", "entrada", "saida", "tipo", "horas"]], use_container_width=True)
-        
-        st.subheader("⚙️ Manutenção")
-        # Botão Zerar reinicia a vida do banco (reseta a cota de 36h)
-        if st.button("Zerar Todo o Banco e Cota", type="primary"):
+        if st.button("Zerar Todo o Ciclo (Reiniciar Cota)", type="primary"):
             salvar_dados(df_todos[df_todos['usuario'] != st.session_state.usuario])
-            st.rerun()
-
-        st.divider()
-        ops = {f"{r['data']} | {r['tipo']} | {r['horas']:.2f}h": i for i, r in df_user.iterrows()}
-        sel = st.selectbox("Apagar linha:", options=list(ops.keys()))
-        if st.button("Remover Registro"):
-            salvar_dados(df_todos.drop(ops[sel]))
             st.rerun()
