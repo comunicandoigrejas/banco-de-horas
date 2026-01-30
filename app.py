@@ -5,9 +5,21 @@ from datetime import datetime, time
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Banco de Horas e Extras", layout="centered")
+
+# --- CONEXÃO E LIMPEZA ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- FUNÇÕES FINANCEIRAS ---
+def buscar_dados(aba):
+    # ttl=0 força o Streamlit a buscar dados novos no Google Sheets toda vez
+    return conn.read(worksheet=aba, ttl=0)
+
+def salvar_dados(df_novo):
+    conn.update(worksheet="Lancamentos", data=df_novo)
+    # Limpa o cache global para garantir que o próximo 'buscar_dados' venha fresco
+    st.cache_data.clear()
+    st.cache_resource.clear()
+
+# --- REGRAS DE CÁLCULO ---
 def calcular_impostos(valor_bruto):
     inss = 0
     faixas_inss = [(1518.0, 0.075), (2800.0, 0.09), (4200.0, 0.12), (8157.0, 0.14)]
@@ -19,7 +31,6 @@ def calcular_impostos(valor_bruto):
         else:
             inss += (valor_bruto - anterior) * aliquota
             break
-    
     base_irpf = valor_bruto - inss
     irpf = 0
     if base_irpf > 4664.68: irpf = (base_irpf * 0.275) - 893.66
@@ -28,13 +39,6 @@ def calcular_impostos(valor_bruto):
     elif base_irpf > 2259.20: irpf = (base_irpf * 0.075) - 169.44
     return inss + max(0, irpf)
 
-def buscar_dados(aba):
-    return conn.read(worksheet=aba, ttl=0)
-
-def salvar_dados(df_novo):
-    conn.update(worksheet="Lancamentos", data=df_novo)
-    st.cache_data.clear()
-
 def calcular_horas_regra(data, entrada, saida, almoco, tipo="positivo"):
     t1 = datetime.combine(data, entrada); t2 = datetime.combine(data, saida)
     diff = (t2 - t1).total_seconds() / 3600
@@ -42,7 +46,7 @@ def calcular_horas_regra(data, entrada, saida, almoco, tipo="positivo"):
     brutas = max(0, diff)
     
     if tipo == "positivo":
-        if data.weekday() <= 4: # Semana: 1.25x (Limite 2h finais)
+        if data.weekday() <= 4: # Semana: 1.25x (Limite 2h finais por dia)
             return min(brutas * 1.25, 2.0)
         elif data.weekday() == 5: # Sábado: 1.5x
             return brutas * 1.5
@@ -65,17 +69,17 @@ if not st.session_state.logado:
             else: st.error("Acesso Negado")
     st.stop()
 
-# --- CONFIGURAÇÃO ---
+# --- LÓGICA DE PROCESSAMENTO ---
 v_hora = st.sidebar.number_input("Valor da Hora (R$)", min_value=0.0, value=25.0)
 salario_base = v_hora * 220
 
-# --- LÓGICA DE COTA TRANCADA (36H) ---
 df_todos = buscar_dados("Lancamentos")
 df_user = df_todos[df_todos['usuario'] == st.session_state.usuario].copy()
 
-cota_usada = 0
+# Variáveis de controle
+cota_acumulada = 0
 saldo_folgas = 0
-horas_em_dinheiro = 0
+extras_dinheiro = 0
 
 if not df_user.empty:
     df_user['data_dt'] = pd.to_datetime(df_user['data'], dayfirst=True, errors='coerce')
@@ -83,25 +87,21 @@ if not df_user.empty:
     
     for _, row in df_user.iterrows():
         if row['tipo'] == "Crédito":
-            if cota_usada < 36:
-                vaga = 36 - cota_usada
-                # Quanto desse lançamento vai para o banco
+            if cota_acumulada < 36:
+                vaga = 36 - cota_acumulada
                 para_banco = min(row['horas'], vaga)
-                # Quanto desse lançamento já vira dinheiro (se houver transbordo)
                 para_dinheiro = max(0, row['horas'] - vaga)
                 
-                cota_usada += para_banco
+                cota_acumulada += para_banco
                 saldo_folgas += para_banco
-                horas_em_dinheiro += para_dinheiro
+                extras_dinheiro += para_dinheiro
             else:
-                # Cota de 36h já batida. Tudo vira dinheiro, nada entra no saldo de folgas.
-                horas_em_dinheiro += row['horas']
+                extras_dinheiro += row['horas']
         elif row['tipo'] == "Débito":
-            # Folgas tiram do saldo, mas não permitem reabastecer a cota
             saldo_folgas -= row['horas']
 
-# --- FINANCEIRO ---
-bruto_extras = horas_em_dinheiro * (v_hora * 2.1) # 110%
+# Financeiro
+bruto_extras = extras_dinheiro * (v_hora * 2.1)
 imp_base = calcular_impostos(salario_base)
 imp_total = calcular_impostos(salario_base + bruto_extras)
 liquido_extras = bruto_extras - (imp_total - imp_base)
@@ -111,18 +111,15 @@ st.title("Banco de Horas e Extras")
 tab1, tab2, tab3 = st.tabs(["➕ Créditos", "➖ Folgas", "📊 Extrato"])
 
 with tab1:
-    st.info(f"Consumo da Cota de Banco: **{cota_usada:.2f} / 36.00h**")
-    st.progress(min(1.0, cota_usada / 36))
+    st.write(f"Cota de Banco: **{cota_acumulada:.2f} / 36.00h**")
+    st.progress(min(1.0, cota_acumulada / 36))
     
-    if cota_usada >= 36:
-        st.success("✅ Cota de 36h preenchida. Novos lançamentos calculados em R$.")
-
     with st.form("f_c"):
         d = st.date_input("Data")
         c1, c2 = st.columns(2)
         ent = c1.time_input("Entrada", value=time(8,0), step=300)
         sai = c2.time_input("Saída", value=time(17,0), step=300)
-        alm = st.checkbox("Almoço?", value=True)
+        alm = st.checkbox("Descontar Almoço?", value=True)
         if st.form_submit_button("Registrar"):
             h = calcular_horas_regra(d, ent, sai, alm, "positivo")
             novo = pd.DataFrame([{"usuario": st.session_state.usuario, "data": d.strftime("%d/%m/%Y"), 
@@ -132,11 +129,10 @@ with tab1:
             st.rerun()
 
 with tab2:
-    st.subheader("Registrar Folga")
-    st.warning(f"Saldo atual para folgas: **{saldo_folgas:.2f}h**")
+    st.write(f"Saldo para Folgas: **{saldo_folgas:.2f}h**")
     modo = st.radio("Tipo:", ["Dia Inteiro", "Parcial"])
     with st.form("f_d"):
-        d_n = st.date_input("Data")
+        d_n = st.date_input("Data da Folga")
         h_d, e_v, s_v = 0, "-", "-"
         if modo == "Parcial":
             c1, c2 = st.columns(2)
@@ -153,15 +149,17 @@ with tab2:
             st.rerun()
 
 with tab3:
-    st.subheader("📊 Resumo do Ciclo")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Saldo Folgas", f"{saldo_folgas:.2f}h")
-    c2.metric("Horas em R$", f"{horas_em_dinheiro:.2f}h")
-    c3.metric("Líquido Extras", f"R$ {liquido_extras:,.2f}")
+    st.subheader("Resumo")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Saldo Folgas", f"{saldo_folgas:.2f}h")
+    m2.metric("Horas em R$", f"{extras_dinheiro:.2f}h")
+    m3.metric("Líquido Extra", f"R$ {liquido_extras:,.2f}")
     
     st.divider()
     if not df_user.empty:
         st.dataframe(df_user[["data", "entrada", "saida", "tipo", "horas"]], use_container_width=True)
-        if st.button("Zerar Todo o Ciclo (Reiniciar Cota)", type="primary"):
-            salvar_dados(df_todos[df_todos['usuario'] != st.session_state.usuario])
+        if st.button("🚨 ZERAR TODO O CICLO", type="primary"):
+            # Deleta apenas os dados do usuário atual e limpa cache agressivamente
+            df_final = df_todos[df_todos['usuario'] != st.session_state.usuario]
+            salvar_dados(df_final)
             st.rerun()
