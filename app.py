@@ -32,7 +32,7 @@ def calcular_horas_final(data, entrada, saida, descontar_almoco, tipo="positivo"
         elif data.weekday() == 5: # Sábado
             return brutas * 1.5
     
-    return brutas # Para débitos parciais
+    return brutas # Para débitos
 
 # --- SISTEMA DE LOGIN ---
 if 'logado' not in st.session_state:
@@ -53,14 +53,16 @@ if not st.session_state.logado:
             else: st.error("Acesso negado.")
     st.stop()
 
-# --- DADOS E SALDO ---
+# --- CARREGAMENTO DE DADOS ---
 df_todos = buscar_dados("Lancamentos")
 df_user = df_todos[df_todos['usuario'] == st.session_state.usuario]
+
+# Soma simples de tudo que foi lançado
 total_c = df_user[df_user['tipo'] == "Crédito"]['horas'].sum()
 total_d = df_user[df_user['tipo'] == "Débito"]['horas'].sum()
 
-# Cálculo do Saldo (Créditos Realizados - Débitos Realizados)
-saldo_total = total_c - total_d
+# O SALDO pode ser negativo
+saldo_atual = total_c - total_d
 
 # --- INTERFACE ---
 st.sidebar.write(f"👤 {st.session_state.nome}")
@@ -72,10 +74,14 @@ st.title("Controle de Banco de Horas")
 
 tab1, tab2, tab3 = st.tabs(["➕ Créditos", "➖ Débitos", "📊 Extrato"])
 
+# --- TAB 1: CRÉDITOS ---
 with tab1:
-    restante = 36 - total_c
-    st.info(f"Limite para novos créditos: **{max(0, restante):.2f}h**")
-    if restante <= 0: st.error("Limite de 36h de crédito atingido.")
+    # O limite é 36h de SALDO POSITIVO
+    pode_creditar = 36 - saldo_atual
+    st.info(f"Saldo Atual: **{saldo_atual:.2f}h** | Limite para crédito: **{max(0, pode_creditar):.2f}h**")
+    
+    if pode_creditar <= 0:
+        st.error("Você já atingiu o limite máximo de 36h positivas no banco.")
     else:
         with st.form("f_c"):
             d = st.date_input("Data")
@@ -85,18 +91,26 @@ with tab1:
             alm = st.checkbox("Descontar Almoço?", value=True)
             if st.form_submit_button("Registrar"):
                 h = calcular_horas_final(d, ent, sai, alm, "positivo")
-                if h > restante: h = restante
+                
+                # Se o lançamento ultrapassar o teto de 36h de saldo, ele corta
+                if h > pode_creditar:
+                    h = pode_creditar
+                    st.warning(f"Lançamento ajustado para {h:.2f}h para não exceder o saldo de 36h.")
+                
                 novo = pd.DataFrame([{"usuario": st.session_state.usuario, "data": d.strftime("%d/%m/%Y"), 
                                       "entrada": ent.strftime("%H:%M"), "saida": sai.strftime("%H:%M"), 
                                       "tipo": "Crédito", "horas": h}])
                 salvar_dados(pd.concat([df_todos, novo], ignore_index=True))
-                st.success(f"Crédito de {h:.2f}h registrado!")
                 st.rerun()
 
+# --- TAB 2: DÉBITOS ---
 with tab2:
-    restante_d = 36 - total_d
-    st.info(f"Limite para novos débitos: **{max(0, restante_d):.2f}h**")
-    if restante_d <= 0: st.error("Limite de 36h de débito atingido.")
+    # O limite é -36h de SALDO NEGATIVO
+    pode_debitar = 36 + saldo_atual
+    st.info(f"Saldo Atual: **{saldo_atual:.2f}h** | Capacidade de débito: **{max(0, pode_debitar):.2f}h**")
+    
+    if pode_debitar <= 0:
+        st.error("Limite máximo de débito atingido (-36h).")
     else:
         modo = st.radio("Tipo:", ["Dia Inteiro", "Parcial"])
         with st.form("f_d"):
@@ -108,30 +122,37 @@ with tab2:
                 sa_n = c2.time_input("Fim", value=time(12,0), step=300)
                 al_n = st.checkbox("Descontar Almoço?", value=False)
                 e_v, s_v = en_n.strftime("%H:%M"), sa_n.strftime("%H:%M")
+            
             if st.form_submit_button("Registrar Débito"):
                 if modo == "Dia Inteiro":
                     h_deb = 9.0 if d_n.weekday() <= 3 else 8.0
                     e_v, s_v = "Folga", "Integral"
-                else: h_deb = calcular_horas_final(d_n, en_n, sa_n, al_n, "negativo")
-                if h_deb > restante_d: h_deb = restante_d
+                else: 
+                    h_deb = calcular_horas_final(d_n, en_n, sa_n, al_n, "negativo")
+                
+                # CORREÇÃO AQUI: Se a folga (8h ou 9h) cabe no limite de -36h, lança inteiro
+                if h_deb > pode_debitar:
+                    h_deb = pode_debitar
+                    st.warning(f"Débito ajustado para {h_deb:.2f}h para respeitar o limite de -36h.")
+                
                 novo = pd.DataFrame([{"usuario": st.session_state.usuario, "data": d_n.strftime("%d/%m/%Y"), 
                                       "entrada": e_v, "saida": s_v, "tipo": "Débito", "horas": h_deb}])
                 salvar_dados(pd.concat([df_todos, novo], ignore_index=True))
-                st.success("Débito registrado!")
                 st.rerun()
 
+# --- TAB 3: EXTRATO ---
 with tab3:
-    st.subheader("Resumo e Conferência")
+    st.subheader("Resumo do Banco")
     m1, m2, m3 = st.columns(3)
-    m1.metric("Acúmulo Créditos", f"{total_c:.2f}h")
-    m2.metric("Acúmulo Débitos", f"{total_d:.2f}h")
+    m1.metric("Total Créditos", f"{total_c:.2f}h")
+    m2.metric("Total Débitos", f"{total_d:.2f}h")
     
-    # SALDO ATUAL: Mostra o valor negativo se houver dívida de horas
-    m3.metric(
-        label="Saldo Atual", 
-        value=f"{saldo_total:.2f}h", 
-        delta="Dívida de Horas" if saldo_total < 0 else "Crédito Disponível",
-        delta_color="inverse" if saldo_total < 0 else "normal"
+    # SALDO ATUAL COM SINAL NEGATIVO
+    st.metric(
+        label="Saldo Final Atual", 
+        value=f"{saldo_atual:.2f}h", 
+        delta="Débito (Dívida)" if saldo_atual < 0 else "Crédito (Positivo)",
+        delta_color="inverse" if saldo_atual < 0 else "normal"
     )
     
     st.divider()
