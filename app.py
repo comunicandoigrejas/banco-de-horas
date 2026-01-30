@@ -72,7 +72,7 @@ v_hora = st.sidebar.number_input("Valor da Hora (R$)", min_value=0.0, value=25.0
 salario_base = v_hora * 220
 
 # --- PROCESSAMENTO DA REGRA DE 36H FIXA ---
-df_todos = buscar_dados("Lancamentos")
+df_todos = buscar_data("Lancamentos")
 df_user = df_todos[df_todos['usuario'] == st.session_state.usuario].copy()
 
 total_creditos_na_vida = 0
@@ -80,27 +80,29 @@ saldo_banco_disponivel = 0
 horas_extras_pagas = 0
 
 if not df_user.empty:
-    df_user['data_dt'] = pd.to_datetime(df_user['data'], format='yyyy-mm-dd')
+    # CORREÇÃO AQUI: dayfirst=True ajuda com o formato brasileiro e errors='coerce' evita o travamento
+    df_user['data_dt'] = pd.to_datetime(df_user['data'], dayfirst=True, errors='coerce')
+    
+    # Remove linhas onde a data ficou inválida ou vazia na planilha
+    df_user = df_user.dropna(subset=['data_dt'])
+    
+    # Ordena cronologicamente
     df_user = df_user.sort_values('data_dt')
     
     for _, row in df_user.iterrows():
         if row['tipo'] == "Crédito":
-            # Regra: Se ainda não fez 36h de crédito na vida, vai para o banco
             if total_creditos_na_vida < 36:
                 vaga_no_banco = 36 - total_creditos_na_vida
                 ao_banco = min(row['horas'], vaga_no_banco)
                 saldo_banco_disponivel += ao_banco
-                # O que sobrar do lançamento atual vai para pagamento
                 horas_extras_pagas += max(0, row['horas'] - vaga_no_banco)
                 total_creditos_na_vida += row['horas']
             else:
-                # Cota de 36h já era. Tudo vira dinheiro.
                 horas_extras_pagas += row['horas']
                 total_creditos_na_vida += row['horas']
         elif row['tipo'] == "Débito":
-            # Débitos (folgas) só mexem no saldo que você tem para tirar folga
             saldo_banco_disponivel -= row['horas']
-
+            
 # --- CÁLCULO FINANCEIRO ---
 # Hora Extra 110% (Valor * 2.1)
 bruto_extras = horas_extras_pagas * (v_hora * 2.1)
