@@ -3,15 +3,15 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime, time
 
-# --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="ISOSED - Banco & Financeiro", layout="centered")
+# --- CONFIGURAÇÃO DA PÁGINA ---
+st.set_page_config(page_title="ISOSED - Gestão de Ponto", layout="centered")
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- FUNÇÕES DE CÁLCULO DE IMPOSTOS (TABELAS 2026) ---
+# --- FUNÇÕES DE CÁLCULO FINANCEIRO E IMPOSTOS ---
 
 def calcular_imposto_total(valor_bruto):
-    """Calcula o total de INSS + IRPF para um valor bruto dado."""
-    # 1. INSS PROGRESSIVO
+    """Cálculo progressivo de INSS + IRPF (Tabelas 2026)."""
+    # INSS
     inss = 0
     base_inss = valor_bruto
     faixas_inss = [(1518.00, 0.075), (2800.00, 0.09), (4200.00, 0.12), (8157.00, 0.14)]
@@ -24,7 +24,7 @@ def calcular_imposto_total(valor_bruto):
             inss += (base_inss - anterior) * aliquota
             break
     
-    # 2. IRPF PROGRESSIVO
+    # IRPF
     base_irpf = valor_bruto - inss
     irpf = 0
     if base_irpf > 4664.68: irpf = (base_irpf * 0.275) - 893.66
@@ -32,9 +32,9 @@ def calcular_imposto_total(valor_bruto):
     elif base_irpf > 2826.65: irpf = (base_irpf * 0.15) - 381.44
     elif base_irpf > 2259.20: irpf = (base_irpf * 0.075) - 169.44
     
-    return round(inss + max(0, irpf), 2)
+    return inss + max(0, irpf)
 
-# --- FUNÇÕES DE BANCO ---
+# --- FUNÇÕES DE BANCO DE DADOS ---
 
 def buscar_dados(aba):
     return conn.read(worksheet=aba, ttl=0)
@@ -44,20 +44,23 @@ def salvar_dados(df_novo):
     st.cache_data.clear()
 
 def calcular_horas_logic(data, entrada, saida, almoco, tipo="positivo"):
-    t1 = datetime.combine(data, entrada); t2 = datetime.combine(data, saida)
+    t1 = datetime.combine(data, entrada)
+    t2 = datetime.combine(data, saida)
     diff = (t2 - t1).total_seconds() / 3600
     if almoco: diff -= 1
     brutas = max(0, diff)
     
     if tipo == "positivo":
-        if data.weekday() <= 4: # Semana (Limite 2h já com 1.25x)
+        if data.weekday() <= 4: # Seg a Sex (Limite 2h já com 1.25x)
             return min(brutas * 1.25, 2.0)
         elif data.weekday() == 5: # Sábado (1.5x)
             return brutas * 1.5
     return brutas
 
-# --- LOGIN ---
-if 'logado' not in st.session_state: st.session_state.logado = False
+# --- SISTEMA DE LOGIN ---
+if 'logado' not in st.session_state:
+    st.session_state.logado = False
+
 if not st.session_state.logado:
     st.title("🔐 Login ISOSED")
     with st.form("login"):
@@ -70,59 +73,54 @@ if not st.session_state.logado:
                 st.session_state.logado, st.session_state.usuario = True, u
                 st.session_state.nome = valid.iloc[0]['nome_exibicao']
                 st.rerun()
-            else: st.error("Acesso negado")
+            else:
+                st.error("Usuário ou senha incorretos.")
     st.stop()
 
-# --- SIDEBAR FINANCEIRA ---
-st.sidebar.title("Configurações")
-v_hora = st.sidebar.number_input("Valor da Hora (R$)", min_value=0.0, value=20.0)
+# --- CARREGAMENTO DE DADOS ---
+v_hora = st.sidebar.number_input("Valor da sua Hora (R$)", min_value=0.0, value=25.0)
 salario_base = v_hora * 220
-st.sidebar.write(f"Salário Base Est.: **R$ {salario_base:,.2f}**")
 
-# --- PROCESSAMENTO ---
 df_todos = buscar_dados("Lancamentos")
 df_user = df_todos[df_todos['usuario'] == st.session_state.usuario]
 
-# Lógica de Separação (Banco vs Pago)
-acc_historico = 0
+# --- LÓGICA DE DISTRIBUIÇÃO (BANCO VS PAGAMENTO) ---
+acc_historico_creditos = 0
 h_banco = 0
 h_pagas = 0
 
 for idx, row in df_user.iterrows():
     if row['tipo'] == "Crédito":
-        if acc_historico < 36:
-            vaga = 36 - acc_historico
+        if acc_historico_creditos < 36:
+            vaga = 36 - acc_historico_creditos
             h_banco += min(row['horas'], vaga)
             h_pagas += max(0, row['horas'] - vaga)
-            acc_historico += row['horas']
+            acc_historico_creditos += row['horas']
         else:
             h_pagas += row['horas']
     elif row['tipo'] == "Débito":
         h_banco -= row['horas']
 
-# --- CÁLCULO FINANCEIRO REAL ---
-# Valor da hora extra paga (110% = 2.1x)
-bruto_extras = h_pagas * (v_hora * 2.1)
-total_bruto_mensal = salario_base + bruto_extras
-
-# Imposto apenas sobre o salário
-imp_base = calcular_imposto_total(salario_base)
-# Imposto sobre tudo (Salário + Extras)
-imp_total = calcular_imposto_total(total_bruto_mensal)
-# O imposto que "sobrou" é das horas extras
-desconto_nas_extras = imp_total - imp_base
-liquido_extras = bruto_extras - desconto_nas_extras
+saldo_banco_exibir = h_banco
+total_bruto_extras = h_pagas * (v_hora * 2.1) # 110% de adicional
 
 # --- INTERFACE ---
-st.title("Controle de Ponto e Financeiro")
-tab1, tab2, tab3 = st.tabs(["➕ Lançar Horas", "➖ Lançar Folga", "💰 Extrato & Pagamento"])
+st.sidebar.write(f"👤 {st.session_state.nome}")
+if st.sidebar.button("Sair"):
+    st.session_state.logado = False
+    st.rerun()
 
+st.title("Controle de Ponto")
+tab1, tab2, tab3 = st.tabs(["➕ Lançar Crédito", "➖ Lançar Folga", "📊 Extrato & Financeiro"])
+
+# --- ABA 1: CRÉDITOS ---
 with tab1:
-    st.info(f"Horas no Banco: **{h_banco:.2f}h** | Horas para Pagamento: **{h_pagas:.2f}h**")
+    st.info(f"Créditos no Banco: **{h_banco:.2f}h** (Limite 36h) | Extras para Pagar: **{h_pagas:.2f}h**")
     with st.form("f_c"):
         d = st.date_input("Data")
         c1, c2 = st.columns(2)
-        ent, sai = c1.time_input("Entrada", value=time(8,0), step=300), c2.time_input("Saída", value=time(17,0), step=300)
+        ent = c1.time_input("Entrada", value=time(8,0), step=300)
+        sai = c2.time_input("Saída", value=time(17,0), step=300)
         alm = st.checkbox("Almoço?", value=True)
         if st.form_submit_button("Registrar"):
             h = calcular_horas_logic(d, ent, sai, alm, "positivo")
@@ -132,18 +130,72 @@ with tab1:
             salvar_dados(pd.concat([df_todos, novo], ignore_index=True))
             st.rerun()
 
+# --- ABA 2: FOLGAS (CORRIGIDA) ---
+with tab2:
+    st.subheader("Lançamento de Débitos")
+    modo = st.radio("Selecione o tipo de falta:", ["Dia Inteiro", "Parcial"])
+    with st.form("f_d"):
+        d_n = st.date_input("Data da Folga")
+        h_deb, e_v, s_v = 0, "-", "-"
+        
+        if modo == "Parcial":
+            c1, c2 = st.columns(2)
+            en_n = c1.time_input("Início", value=time(8,0), step=300)
+            sa_n = c2.time_input("Fim", value=time(12,0), step=300)
+            al_n = st.checkbox("Descontar Almoço?", value=False)
+            e_v, s_v = en_n.strftime("%H:%M"), sa_n.strftime("%H:%M")
+        
+        if st.form_submit_button("Registrar Débito"):
+            if modo == "Dia Inteiro":
+                # Regra: Seg-Qui (0-3) = 9h | Sex (4) = 8h
+                h_deb = 9.0 if d_n.weekday() <= 3 else 8.0
+                e_v, s_v = "Folga", "Integral"
+            else:
+                h_deb = calcular_horas_logic(d_n, en_n, sa_n, al_n, "negativo")
+            
+            novo = pd.DataFrame([{"usuario": st.session_state.usuario, "data": d_n.strftime("%d/%m/%Y"), 
+                                  "entrada": e_v, "saida": s_v, "tipo": "Débito", "horas": h_deb}])
+            salvar_dados(pd.concat([df_todos, novo], ignore_index=True))
+            st.rerun()
+
+# --- ABA 3: EXTRATO, FINANCEIRO E EXCLUSÃO ---
 with tab3:
-    st.subheader("📊 Resumo de Horas Extras Pagas (Excesso > 36h)")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Bruto (110%)", f"R$ {bruto_extras:,.2f}")
-    col2.metric("Impostos (INSS/IR)", f"- R$ {desconto_nas_extras:,.2f}")
-    col3.metric("Líquido Extra", f"R$ {liquido_extras:,.2f}", delta="A Receber")
-    
-    with st.expander("Ver detalhes do cálculo"):
-        st.write(f"- Salário Base (220h): R$ {salario_base:,.2f}")
-        st.write(f"- Multiplicador aplicado: 2.10 (Hora + 110%)")
-        st.write(f"- Base de cálculo total para impostos: R$ {total_bruto_mensal:,.2f}")
-    
+    # Financeiro
+    st.subheader("💰 Resumo de Pagamento (Excesso)")
+    imp_base = calcular_imposto_total(salario_base)
+    imp_total = calcular_imposto_total(salario_base + total_bruto_extras)
+    desc_extras = imp_total - imp_base
+    liquido_extras = total_bruto_extras - desc_extras
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Banco (Saldo)", f"{saldo_banco_exibir:.2f}h", delta="Negativo" if saldo_banco_exibir < 0 else "Crédito")
+    c2.metric("Bruto Extra (110%)", f"R$ {total_bruto_extras:,.2f}")
+    c3.metric("Líquido Extra", f"R$ {liquido_extras:,.2f}")
+
     st.divider()
-    st.subheader("📜 Histórico")
-    st.dataframe(df_user[["data", "entrada", "saida", "tipo", "horas"]], use_container_width=True)
+    st.subheader("📜 Histórico Detalhado")
+    if not df_user.empty:
+        st.dataframe(df_user[["data", "entrada", "saida", "tipo", "horas"]], use_container_width=True)
+        
+        st.divider()
+        st.subheader("🗑️ Gerenciar Registros")
+        
+        # Função para zerar
+        if st.button("Zerar Banco de Horas (Ajuste)"):
+            if h_banco != 0:
+                tipo_aj = "Débito" if h_banco > 0 else "Crédito"
+                novo_aj = pd.DataFrame([{"usuario": st.session_state.usuario, "data": datetime.now().strftime("%d/%m/%Y"),
+                                         "entrada": "AJUSTE", "saida": "ZERAR", "tipo": tipo_aj, "horas": abs(h_banco)}])
+                salvar_dados(pd.concat([df_todos, novo_aj], ignore_index=True))
+                st.rerun()
+
+        # Função para excluir linha específica
+        st.write("---")
+        opcoes_del = {f"{r['data']} | {r['tipo']} | {r['horas']:.2f}h": i for i, r in df_user.iterrows()}
+        item_sel = st.selectbox("Selecione um lançamento para apagar:", options=list(opcoes_del.keys()))
+        if st.button("Apagar Registro Selecionado", type="primary"):
+            df_final = df_todos.drop(opcoes_del[item_sel])
+            salvar_dados(df_final)
+            st.rerun()
+    else:
+        st.info("Nenhum lançamento encontrado.")
