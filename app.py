@@ -26,15 +26,15 @@ def calcular_horas_final(data, entrada, saida, descontar_almoco, tipo="positivo"
     
     if tipo == "positivo":
         if data.weekday() <= 4: # Segunda a Sexta
-            # O limite de 2h já inclui o acréscimo de 1.25
+            # Limite de 2h já com o acréscimo de 1.25
             calculado = brutas * 1.25
             return min(calculado, 2.0)
         elif data.weekday() == 5: # Sábado
             return brutas * 1.5
     
-    return brutas # Para débitos
+    return brutas # Para débitos parciais
 
-# --- LOGIN ---
+# --- SISTEMA DE LOGIN ---
 if 'logado' not in st.session_state:
     st.session_state.logado = False
 
@@ -58,7 +58,9 @@ df_todos = buscar_dados("Lancamentos")
 df_user = df_todos[df_todos['usuario'] == st.session_state.usuario]
 total_c = df_user[df_user['tipo'] == "Crédito"]['horas'].sum()
 total_d = df_user[df_user['tipo'] == "Débito"]['horas'].sum()
-saldo = total_c - total_d
+
+# Cálculo do Saldo (Créditos Realizados - Débitos Realizados)
+saldo_total = total_c - total_d
 
 # --- INTERFACE ---
 st.sidebar.write(f"👤 {st.session_state.nome}")
@@ -66,11 +68,13 @@ if st.sidebar.button("Sair"):
     st.session_state.logado = False
     st.rerun()
 
+st.title("Controle de Banco de Horas")
+
 tab1, tab2, tab3 = st.tabs(["➕ Créditos", "➖ Débitos", "📊 Extrato"])
 
 with tab1:
     restante = 36 - total_c
-    st.info(f"Saldo disponível para novos créditos: **{max(0, restante):.2f}h**")
+    st.info(f"Limite para novos créditos: **{max(0, restante):.2f}h**")
     if restante <= 0: st.error("Limite de 36h de crédito atingido.")
     else:
         with st.form("f_c"):
@@ -86,12 +90,12 @@ with tab1:
                                       "entrada": ent.strftime("%H:%M"), "saida": sai.strftime("%H:%M"), 
                                       "tipo": "Crédito", "horas": h}])
                 salvar_dados(pd.concat([df_todos, novo], ignore_index=True))
-                st.success(f"Crédito de {h:.2f}h registrado com sucesso!")
+                st.success(f"Crédito de {h:.2f}h registrado!")
                 st.rerun()
 
 with tab2:
     restante_d = 36 - total_d
-    st.info(f"Limite disponível para novos débitos: **{max(0, restante_d):.2f}h**")
+    st.info(f"Limite para novos débitos: **{max(0, restante_d):.2f}h**")
     if restante_d <= 0: st.error("Limite de 36h de débito atingido.")
     else:
         modo = st.radio("Tipo:", ["Dia Inteiro", "Parcial"])
@@ -119,17 +123,24 @@ with tab2:
 with tab3:
     st.subheader("Resumo e Conferência")
     m1, m2, m3 = st.columns(3)
-    m1.metric("Total Créditos", f"{total_c:.2f}h")
-    m2.metric("Total Débitos", f"{total_d:.2f}h")
-    m3.metric("Saldo Atual", f"{saldo:.2f}h")
+    m1.metric("Acúmulo Créditos", f"{total_c:.2f}h")
+    m2.metric("Acúmulo Débitos", f"{total_d:.2f}h")
     
+    # SALDO ATUAL: Mostra o valor negativo se houver dívida de horas
+    m3.metric(
+        label="Saldo Atual", 
+        value=f"{saldo_total:.2f}h", 
+        delta="Dívida de Horas" if saldo_total < 0 else "Crédito Disponível",
+        delta_color="inverse" if saldo_total < 0 else "normal"
+    )
+    
+    st.divider()
     if not df_user.empty:
-        # Colunas na ordem solicitada: Data, Entrada, Saída, Tipo, Horas
         st.dataframe(df_user[["data", "entrada", "saida", "tipo", "horas"]], use_container_width=True)
         st.divider()
         st.subheader("🗑️ Apagar Registro")
-        ops = {f"{r['data']} | {r['entrada']}-{r['saida']} | {r['tipo']}": i for i, r in df_user.iterrows()}
-        sel = st.selectbox("Selecione o item:", options=list(ops.keys()))
-        if st.button("Remover permanentemente", type="primary"):
+        ops = {f"{r['data']} | {r['tipo']} | {r['horas']:.2f}h": i for i, r in df_user.iterrows()}
+        sel = st.selectbox("Selecione para remover:", options=list(ops.keys()))
+        if st.button("Remover Permanentemente", type="primary"):
             salvar_dados(df_todos.drop(ops[sel]))
             st.rerun()
