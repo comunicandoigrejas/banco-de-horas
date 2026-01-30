@@ -57,11 +57,8 @@ if not st.session_state.logado:
 df_todos = buscar_dados("Lancamentos")
 df_user = df_todos[df_todos['usuario'] == st.session_state.usuario]
 
-# Soma simples de tudo que foi lançado
 total_c = df_user[df_user['tipo'] == "Crédito"]['horas'].sum()
 total_d = df_user[df_user['tipo'] == "Débito"]['horas'].sum()
-
-# O SALDO pode ser negativo
 saldo_atual = total_c - total_d
 
 # --- INTERFACE ---
@@ -76,12 +73,11 @@ tab1, tab2, tab3 = st.tabs(["➕ Créditos", "➖ Débitos", "📊 Extrato"])
 
 # --- TAB 1: CRÉDITOS ---
 with tab1:
-    # O limite é 36h de SALDO POSITIVO
     pode_creditar = 36 - saldo_atual
-    st.info(f"Saldo Atual: **{saldo_atual:.2f}h** | Limite para crédito: **{max(0, pode_creditar):.2f}h**")
+    st.info(f"Saldo: **{saldo_atual:.2f}h** | Limite para crédito: **{max(0, pode_creditar):.2f}h**")
     
     if pode_creditar <= 0:
-        st.error("Você já atingiu o limite máximo de 36h positivas no banco.")
+        st.error("Limite máximo de 36h positivas atingido.")
     else:
         with st.form("f_c"):
             d = st.date_input("Data")
@@ -91,11 +87,7 @@ with tab1:
             alm = st.checkbox("Descontar Almoço?", value=True)
             if st.form_submit_button("Registrar"):
                 h = calcular_horas_final(d, ent, sai, alm, "positivo")
-                
-                # Se o lançamento ultrapassar o teto de 36h de saldo, ele corta
-                if h > pode_creditar:
-                    h = pode_creditar
-                    st.warning(f"Lançamento ajustado para {h:.2f}h para não exceder o saldo de 36h.")
+                if h > pode_creditar: h = pode_creditar
                 
                 novo = pd.DataFrame([{"usuario": st.session_state.usuario, "data": d.strftime("%d/%m/%Y"), 
                                       "entrada": ent.strftime("%H:%M"), "saida": sai.strftime("%H:%M"), 
@@ -105,9 +97,8 @@ with tab1:
 
 # --- TAB 2: DÉBITOS ---
 with tab2:
-    # O limite é -36h de SALDO NEGATIVO
     pode_debitar = 36 + saldo_atual
-    st.info(f"Saldo Atual: **{saldo_atual:.2f}h** | Capacidade de débito: **{max(0, pode_debitar):.2f}h**")
+    st.info(f"Saldo: **{saldo_atual:.2f}h** | Capacidade de débito: **{max(0, pode_debitar):.2f}h**")
     
     if pode_debitar <= 0:
         st.error("Limite máximo de débito atingido (-36h).")
@@ -127,41 +118,59 @@ with tab2:
                 if modo == "Dia Inteiro":
                     h_deb = 9.0 if d_n.weekday() <= 3 else 8.0
                     e_v, s_v = "Folga", "Integral"
-                else: 
-                    h_deb = calcular_horas_final(d_n, en_n, sa_n, al_n, "negativo")
+                else: h_deb = calcular_horas_final(d_n, en_n, sa_n, al_n, "negativo")
                 
-                # CORREÇÃO AQUI: Se a folga (8h ou 9h) cabe no limite de -36h, lança inteiro
-                if h_deb > pode_debitar:
-                    h_deb = pode_debitar
-                    st.warning(f"Débito ajustado para {h_deb:.2f}h para respeitar o limite de -36h.")
+                if h_deb > pode_debitar: h_deb = pode_debitar
                 
                 novo = pd.DataFrame([{"usuario": st.session_state.usuario, "data": d_n.strftime("%d/%m/%Y"), 
                                       "entrada": e_v, "saida": s_v, "tipo": "Débito", "horas": h_deb}])
                 salvar_dados(pd.concat([df_todos, novo], ignore_index=True))
                 st.rerun()
 
-# --- TAB 3: EXTRATO ---
+# --- TAB 3: EXTRATO E FUNÇÕES ADM ---
 with tab3:
     st.subheader("Resumo do Banco")
     m1, m2, m3 = st.columns(3)
-    m1.metric("Total Créditos", f"{total_c:.2f}h")
-    m2.metric("Total Débitos", f"{total_d:.2f}h")
+    m1.metric("Créditos Acumulados", f"{total_c:.2f}h")
+    m2.metric("Débitos Acumulados", f"{total_d:.2f}h")
+    m3.metric(label="Saldo Final", value=f"{saldo_atual:.2f}h", 
+              delta="Abaixo do esperado" if saldo_atual < 0 else "Crédito",
+              delta_color="inverse" if saldo_atual < 0 else "normal")
     
-    # SALDO ATUAL COM SINAL NEGATIVO
-    st.metric(
-        label="Saldo Final Atual", 
-        value=f"{saldo_atual:.2f}h", 
-        delta="Débito (Dívida)" if saldo_atual < 0 else "Crédito (Positivo)",
-        delta_color="inverse" if saldo_atual < 0 else "normal"
-    )
+    st.divider()
     
+    # --- FUNÇÃO ZERAR BANCO ---
+    st.subheader("⚙️ Ajustes de Banco")
+    with st.expander("Clique aqui para Zerar o Banco de Horas"):
+        st.warning("Atenção: Esta ação criará um lançamento de ajuste para que seu saldo atual chegue a 0.00h.")
+        if st.button("Confirmar: Zerar meu Banco agora", type="primary"):
+            if saldo_atual == 0:
+                st.info("Seu banco já está zerado.")
+            else:
+                # Se saldo é +10, lançamos débito de 10. Se é -5, lançamos crédito de 5.
+                tipo_ajuste = "Débito" if saldo_atual > 0 else "Crédito"
+                valor_ajuste = abs(saldo_atual)
+                
+                novo_ajuste = pd.DataFrame([{
+                    "usuario": st.session_state.usuario,
+                    "data": datetime.now().strftime("%d/%m/%Y"),
+                    "entrada": "AJUSTE",
+                    "saida": "ZERAR",
+                    "tipo": tipo_ajuste,
+                    "horas": valor_ajuste
+                }])
+                
+                salvar_dados(pd.concat([df_todos, novo_ajuste], ignore_index=True))
+                st.success("Banco zerado com sucesso!")
+                st.rerun()
+
     st.divider()
     if not df_user.empty:
         st.dataframe(df_user[["data", "entrada", "saida", "tipo", "horas"]], use_container_width=True)
-        st.divider()
+        
         st.subheader("🗑️ Apagar Registro")
         ops = {f"{r['data']} | {r['tipo']} | {r['horas']:.2f}h": i for i, r in df_user.iterrows()}
         sel = st.selectbox("Selecione para remover:", options=list(ops.keys()))
-        if st.button("Remover Permanentemente", type="primary"):
+        if st.button("Remover Registro Selecionado"):
             salvar_dados(df_todos.drop(ops[sel]))
             st.rerun()
