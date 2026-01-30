@@ -17,27 +17,29 @@ def realizar_login():
             pass_input = st.text_input("Senha", type="password")
             botao_entrar = st.form_submit_button("Acessar Sistema")
 
-            if botao_entrar:
-                # Busca a lista de usuários na aba "Usuarios"
-                try:
-                     df_usuarios = conn.read(worksheet="Usuarios", ttl=0)
-                                       
-                    # Verifica se o usuário e senha batem
-                    usuario_valido = df_usuarios[
-                        (df_usuarios['usuario'] == user_input) & 
-                        (df_usuarios['senha'].astype(str) == pass_input)
-                    ]
-
-                    if not usuario_valido.empty:
-                        st.session_state.logado = True
-                        st.session_state.usuario = user_input
-                        st.session_state.nome_tela = usuario_valido.iloc[0]['nome_exibicao']
-                        st.rerun()
-                    else:
-                        st.error("Usuário ou senha incorretos.")
-                except Exception as e:
-                    st.error("Erro ao conectar com a base de usuários.")
+           if botao_entrar:
+    try:
+        # 1. Busca a lista de usuários (4 espaços)
+        df_usuarios = conn.read(worksheet="Usuarios", ttl=0)
         
+        # 2. Filtra o usuário (Aqui estava o erro - deve estar alinhado com a linha acima)
+        usuario_valido = df_usuarios[
+            (df_usuarios['usuario'] == user_input) & 
+            (df_usuarios['senha'].astype(str) == pass_input)
+        ]
+
+        # 3. Verifica se encontrou algo
+        if not usuario_valido.empty:
+            st.session_state.logado = True
+            st.session_state.usuario = user_input
+            st.session_state.nome_tela = usuario_valido.iloc[0]['nome_exibicao']
+            st.rerun()
+        else:
+            st.error("Usuário ou senha incorretos.")
+            
+    except Exception as e:
+        st.error(f"Erro técnico: {e}")
+                         
         st.stop() # Interrompe o script aqui se não estiver logado
 
 # --- EXECUÇÃO DO LOGIN ---
