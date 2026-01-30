@@ -68,11 +68,12 @@ if not st.session_state.logado:
     st.stop()
 
 # --- SIDEBAR ---
-v_hora = st.sidebar.number_input("Valor da Hora (R$)", min_value=0.0, value=25.0)
+# --- CARREGAMENTO E LOGICA DE LIMITE ---
+v_hora = st.sidebar.number_input("Valor Hora (R$)", min_value=0.0, value=25.0)
 salario_base = v_hora * 220
 
-# --- PROCESSAMENTO DA REGRA DE 36H FIXA ---
-df_todos = buscar_data("Lancamentos")
+# Chamada corrigida: de buscar_data para buscar_dados
+df_todos = buscar_dados("Lancamentos") 
 df_user = df_todos[df_todos['usuario'] == st.session_state.usuario].copy()
 
 total_creditos_na_vida = 0
@@ -80,13 +81,9 @@ saldo_banco_disponivel = 0
 horas_extras_pagas = 0
 
 if not df_user.empty:
-    # CORREÇÃO AQUI: dayfirst=True ajuda com o formato brasileiro e errors='coerce' evita o travamento
+    # Tratamento robusto de datas para evitar o erro anterior
     df_user['data_dt'] = pd.to_datetime(df_user['data'], dayfirst=True, errors='coerce')
-    
-    # Remove linhas onde a data ficou inválida ou vazia na planilha
     df_user = df_user.dropna(subset=['data_dt'])
-    
-    # Ordena cronologicamente
     df_user = df_user.sort_values('data_dt')
     
     for _, row in df_user.iterrows():
