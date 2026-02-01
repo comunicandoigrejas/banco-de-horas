@@ -3,8 +3,19 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime, time
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
+# --- CONFIGURAÇÃO DA PÁGINA E CSS PARA LIMPAR INTERFACE ---
 st.set_page_config(page_title="Banco de Horas e Extras", layout="centered")
+
+# CSS para esconder o header do Streamlit (botão GitHub e Menu 3 pontos)
+st.markdown("""
+    <style>
+    #MainMenu {visibility: hidden;}
+    header {visibility: hidden;}
+    footer {visibility: hidden;}
+    .stAppDeployButton {display:none;}
+    </style>
+    """, unsafe_allow_html=True)
+
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # --- FUNÇÕES DE APOIO ---
@@ -18,10 +29,13 @@ def buscar_dados(aba):
         df['tipo_limpo'] = df['tipo_limpo'].str.normalize('NFKD').str.encode('ascii', errors='ignore').str.decode('utf-8')
     return df
 
-def salvar_dados(df_novo):
-    cols_drop = ['tipo_limpo', 'data_dt', 'cota_acumulada', 'h_banco', 'h_pago']
-    df_save = df_novo.drop(columns=[c for c in cols_drop if c in df_novo.columns])
-    conn.update(worksheet="Lancamentos", data=df_save)
+def salvar_dados(aba, df_novo):
+    # Limpeza de colunas internas para a aba Lancamentos
+    if aba == "Lancamentos":
+        cols_drop = ['tipo_limpo', 'data_dt', 'cota_acumulada', 'h_banco', 'h_pago']
+        df_novo = df_novo.drop(columns=[c for c in cols_drop if c in df_novo.columns])
+    
+    conn.update(worksheet=aba, data=df_novo)
     st.cache_data.clear()
 
 def calcular_impostos(valor_bruto):
@@ -43,9 +57,10 @@ def calcular_impostos(valor_bruto):
     elif base_ir > 2259.20: ir = (base_ir * 0.075) - 169.44
     return inss + max(0, ir)
 
-# --- SISTEMA DE LOGIN ---
+# --- SISTEMA DE LOGIN E PREFERÊNCIAS ---
 if 'logado' not in st.session_state: st.session_state.logado = False
 if 'v_hora' not in st.session_state: st.session_state.v_hora = 25.0
+if 'cor_boneco' not in st.session_state: st.session_state.cor_boneco = "blue"
 
 if not st.session_state.logado:
     st.title("🔐 Acesso ao Sistema")
@@ -63,7 +78,8 @@ if not st.session_state.logado:
 
 # --- TOPO DA PÁGINA ---
 c1, c2 = st.columns([4, 1])
-c1.subheader(f"👤 Usuário: {st.session_state.nome}")
+# Uso de cores no ícone conforme preferência
+c1.markdown(f"### :{st.session_state.cor_boneco}[👤] Usuário: {st.session_state.nome}")
 if c2.button("Sair"):
     st.session_state.logado = False
     st.rerun()
@@ -74,9 +90,8 @@ st.title("Banco de Horas e Extras")
 df_todos = buscar_dados("Lancamentos")
 df_user = df_todos[df_todos['usuario'] == st.session_state.usuario].copy()
 
-total_h_banco = 0.0
-total_h_pagas = 0.0
 saldo_folgas = 0.0
+total_h_pagas = 0.0
 cota_usada_na_vida = 0.0
 
 if not df_user.empty:
@@ -96,15 +111,42 @@ if not df_user.empty:
             saldo_folgas -= h
 
 # --- ABAS ---
-tab1, tab2, tab3, tab4 = st.tabs(["➕ Créditos", "➖ Folgas", "💰 Financeiro & Extrato", "⚙️ Configurações"])
+tab1, tab2, tab3, tab4 = st.tabs(["➕ Créditos", "➖ Folgas", "💰 Financeiro", "⚙️ Configurações"])
 
 with tab4:
-    st.subheader("Configurações Financeiras")
-    st.session_state.v_hora = st.number_input("Valor da sua Hora (R$)", min_value=0.0, value=st.session_state.v_hora, step=0.5)
-    st.info(f"Salário Base Estimado (220h): R$ {st.session_state.v_hora * 220:,.2f}")
+    st.subheader("Configurações do Perfil")
+    
+    # Troca de Cor do Boneco
+    st.session_state.cor_boneco = st.selectbox(
+        "Cor do ícone de usuário:", 
+        ["blue", "green", "orange", "red", "violet", "gray"],
+        index=0
+    )
+    
+    st.divider()
+    
+    # Valor da Hora
+    st.session_state.v_hora = st.number_input("Valor da sua Hora (R$):", min_value=0.0, value=st.session_state.v_hora)
+    
+    st.divider()
+    
+    # Alteração de Senha
+    with st.expander("Alterar Senha de Acesso"):
+        with st.form("nova_senha"):
+            p_atual = st.text_input("Senha Atual", type="password")
+            p_nova = st.text_input("Nova Senha", type="password")
+            if st.form_submit_button("Atualizar Senha"):
+                df_u = buscar_dados("Usuarios")
+                idx = df_u[df_u['usuario'] == st.session_state.usuario].index
+                if str(df_u.loc[idx, 'senha'].values[0]) == p_atual:
+                    df_u.loc[idx, 'senha'] = p_nova
+                    salvar_dados("Usuarios", df_u)
+                    st.success("Senha alterada com sucesso!")
+                else:
+                    st.error("Senha atual incorreta.")
 
 with tab1:
-    st.write(f"Cota de Banco Utilizada: **{min(36.0, cota_usada_na_vida):.2f} / 36.00h**")
+    st.write(f"Cota Utilizada: **{min(36.0, cota_usada_na_vida):.2f} / 36.00h**")
     st.progress(min(1.0, cota_usada_na_vida / 36))
     with st.form("f_cred"):
         d = st.date_input("Data")
@@ -119,11 +161,11 @@ with tab1:
             novo = pd.DataFrame([{"usuario": st.session_state.usuario, "data": d.strftime("%d/%m/%Y"), 
                                   "entrada": ent.strftime("%H:%M"), "saida": sai.strftime("%H:%M"), 
                                   "tipo": "Crédito", "horas": h_calc}])
-            salvar_dados(pd.concat([df_todos, novo], ignore_index=True))
+            salvar_dados("Lancamentos", pd.concat([df_todos, novo], ignore_index=True))
             st.rerun()
 
 with tab2:
-    st.write(f"Saldo atual para folgas: **{saldo_folgas:.2f}h**")
+    st.write(f"Saldo para folgas: **{saldo_folgas:.2f}h**")
     modo = st.radio("Duração:", ["Dia Inteiro", "Parcial"])
     with st.form("f_deb"):
         dn = st.date_input("Data")
@@ -142,7 +184,7 @@ with tab2:
                 if alm_f: hf -= 1
             novo = pd.DataFrame([{"usuario": st.session_state.usuario, "data": dn.strftime("%d/%m/%Y"), 
                                   "entrada": ev, "saida": sv, "tipo": "Débito", "horas": float(hf)}])
-            salvar_dados(pd.concat([df_todos, novo], ignore_index=True))
+            salvar_dados("Lancamentos", pd.concat([df_todos, novo], ignore_index=True))
             st.rerun()
 
 with tab3:
@@ -153,14 +195,14 @@ with tab3:
     imp_t = calcular_impostos(salario_base + bruto_ex)
     liq_ex = bruto_ex - (imp_t - imp_b)
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Saldo de Horas", f"{saldo_folgas:.2f}h")
-    c2.metric("Horas Extras (R$)", f"{total_h_pagas:.2f}h")
-    c3.metric("Líquido a Receber", f"R$ {liq_ex:,.2f}")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Saldo de Horas", f"{saldo_folgas:.2f}h")
+    col2.metric("Horas em R$", f"{total_h_pagas:.2f}h")
+    col3.metric("Líquido Extra", f"R$ {liq_ex:,.2f}")
 
     st.divider()
     if not df_user.empty:
         st.dataframe(df_user[["data", "entrada", "saida", "tipo", "horas"]], use_container_width=True)
         if st.button("🚨 ZERAR CICLO", type="primary"):
-            salvar_dados(df_todos[df_todos['usuario'] != st.session_state.usuario])
+            salvar_dados("Lancamentos", df_todos[df_todos['usuario'] != st.session_state.usuario])
             st.rerun()
