@@ -30,7 +30,6 @@ def buscar_dados(aba):
     return df
 
 def salvar_dados(aba, df_novo):
-    # Limpeza de colunas internas para a aba Lancamentos
     if aba == "Lancamentos":
         cols_drop = ['tipo_limpo', 'data_dt', 'cota_acumulada', 'h_banco', 'h_pago']
         df_novo = df_novo.drop(columns=[c for c in cols_drop if c in df_novo.columns])
@@ -57,10 +56,9 @@ def calcular_impostos(valor_bruto):
     elif base_ir > 2259.20: ir = (base_ir * 0.075) - 169.44
     return inss + max(0, ir)
 
-# --- SISTEMA DE LOGIN E PREFERÊNCIAS ---
+# --- SISTEMA DE LOGIN ---
 if 'logado' not in st.session_state: st.session_state.logado = False
 if 'v_hora' not in st.session_state: st.session_state.v_hora = 25.0
-if 'cor_boneco' not in st.session_state: st.session_state.cor_boneco = "blue"
 
 if not st.session_state.logado:
     st.title("🔐 Acesso ao Sistema")
@@ -78,8 +76,7 @@ if not st.session_state.logado:
 
 # --- TOPO DA PÁGINA ---
 c1, c2 = st.columns([4, 1])
-# Uso de cores no ícone conforme preferência
-c1.markdown(f"### :{st.session_state.cor_boneco}[👤] Usuário: {st.session_state.nome}")
+c1.markdown(f"### 👤 Usuário: {st.session_state.nome}")
 if c2.button("Sair"):
     st.session_state.logado = False
     st.rerun()
@@ -115,15 +112,6 @@ tab1, tab2, tab3, tab4 = st.tabs(["➕ Créditos", "➖ Folgas", "💰 Financeir
 
 with tab4:
     st.subheader("Configurações do Perfil")
-    
-    # Troca de Cor do Boneco
-    st.session_state.cor_boneco = st.selectbox(
-        "Cor do ícone de usuário:", 
-        ["blue", "green", "orange", "red", "violet", "gray"],
-        index=0
-    )
-    
-    st.divider()
     
     # Valor da Hora
     st.session_state.v_hora = st.number_input("Valor da sua Hora (R$):", min_value=0.0, value=st.session_state.v_hora)
