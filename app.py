@@ -6,7 +6,6 @@ from datetime import datetime, time
 # --- CONFIGURAÇÃO DA PÁGINA E CSS ---
 st.set_page_config(page_title="Banco de Horas e Extras", layout="centered")
 
-# CSS para esconder o header (GitHub/Menu) e estilizar botões de navegação
 st.markdown("""
     <style>
     #MainMenu {visibility: hidden;}
@@ -32,7 +31,7 @@ def buscar_dados(aba):
 
 def salvar_dados(aba, df_novo):
     if aba == "Lancamentos":
-        cols_drop = ['tipo_limpo', 'data_dt', 'cota_acumulada', 'h_banco', 'h_pago']
+        cols_drop = ['tipo_limpo', 'data_dt', 'h_banco', 'h_pago', 'cota_acum']
         df_novo = df_novo.drop(columns=[c for c in cols_drop if c in df_novo.columns])
     conn.update(worksheet=aba, data=df_novo)
     st.cache_data.clear()
@@ -56,30 +55,26 @@ def calcular_impostos(valor_bruto):
     elif base_ir > 2259.20: ir = (base_ir * 0.075) - 169.44
     return inss + max(0, ir)
 
-# --- INICIALIZAÇÃO DE ESTADO ---
+# --- LOGIN E NAVEGAÇÃO ---
 if 'logado' not in st.session_state: st.session_state.logado = False
 if 'aba_ativa' not in st.session_state: st.session_state.aba_ativa = "Créditos"
 
-# --- LOGIN ---
 if not st.session_state.logado:
     st.title("🔐 Acesso ao Sistema")
     with st.form("login"):
-        u = st.text_input("Usuário").lower().strip()
-        p = st.text_input("Senha", type="password")
+        u, p = st.text_input("Usuário").lower().strip(), st.text_input("Senha", type="password")
         if st.form_submit_button("Entrar"):
             df_u = buscar_dados("Usuarios")
             user_data = df_u[(df_u['usuario'] == u) & (df_u['senha'].astype(str) == p)]
             if not user_data.empty:
-                st.session_state.logado = True
-                st.session_state.usuario = u
+                st.session_state.logado, st.session_state.usuario = True, u
                 st.session_state.nome = user_data.iloc[0]['nome_exibicao']
-                # Carrega o valor da hora salvo na planilha (se houver a coluna)
                 st.session_state.v_hora = float(user_data.iloc[0].get('valor_hora', 25.0))
                 st.rerun()
             else: st.error("Acesso negado.")
     st.stop()
 
-# --- HEADER ---
+# --- INTERFACE ---
 c_h1, c_h2 = st.columns([4, 1])
 c_h1.subheader(f"👤 Usuário: {st.session_state.nome}")
 if c_h2.button("Sair"):
@@ -88,7 +83,6 @@ if c_h2.button("Sair"):
 
 st.title("Banco de Horas e Extras")
 
-# --- MENU DE NAVEGAÇÃO (SUBSTITUI ST.TABS PARA EVITAR RESET) ---
 c_nav1, c_nav2, c_nav3, c_nav4 = st.columns(4)
 if c_nav1.button("➕ Créditos"): st.session_state.aba_ativa = "Créditos"
 if c_nav2.button("➖ Folgas"): st.session_state.aba_ativa = "Folgas"
@@ -97,27 +91,37 @@ if c_nav4.button("⚙️ Configurações"): st.session_state.aba_ativa = "Config
 
 st.divider()
 
-# --- PROCESSAMENTO DE DADOS ---
+# --- PROCESSAMENTO LOGICO ---
 df_todos = buscar_dados("Lancamentos")
 df_user = df_todos[df_todos['usuario'] == st.session_state.usuario].copy()
 
 saldo_folgas, total_h_pagas, cota_vida = 0.0, 0.0, 0.0
+analise_lista = []
 
 if not df_user.empty:
     df_user['data_dt'] = pd.to_datetime(df_user['data'], dayfirst=True, errors='coerce')
     df_user = df_user.dropna(subset=['data_dt']).sort_values('data_dt')
+    
     for _, row in df_user.iterrows():
         h = float(row['horas'])
+        h_b, h_p = 0.0, 0.0
+        
         if row['tipo_limpo'] == "credito":
             if cota_vida < 36:
                 vaga = 36 - cota_vida
-                ao_banco = min(h, vaga)
-                saldo_folgas += ao_banco
-                total_h_pagas += max(0, h - vaga)
-                cota_vida += h
-            else: total_h_pagas += h
+                h_b = min(h, vaga)
+                h_p = max(0, h - vaga)
+                saldo_folgas += h_b
+                total_h_pagas += h_p
+                cota_vida += h # Cota fixa que nunca desce
+            else:
+                h_p = h
+                total_h_pagas += h_p
         elif row['tipo_limpo'] == "debito":
             saldo_folgas -= h
+            h_b = -h
+            
+        analise_lista.append({"Data": row['data'], "Tipo": row['tipo'], "Total": h, "Ao Banco": h_b, "Ao Bolso": h_p})
 
 # --- TELAS ---
 
@@ -146,11 +150,10 @@ elif st.session_state.aba_ativa == "Folgas":
     with st.form("f_d"):
         dn = st.date_input("Data")
         hf, ev, sv = 0.0, "-", "-"
-        alm_f = False
         if modo == "Parcial":
             c1, c2 = st.columns(2)
             en, sn = c1.time_input("Início", value=time(8,0)), c2.time_input("Fim", value=time(12,0))
-            alm_f = st.checkbox("Descontar Almoço na Folga Parcial?")
+            alm_f = st.checkbox("Descontar Almoço?")
             ev, sv = en.strftime("%H:%M"), sn.strftime("%H:%M")
         if st.form_submit_button("Confirmar Débito"):
             if modo == "Dia Inteiro":
@@ -165,7 +168,6 @@ elif st.session_state.aba_ativa == "Folgas":
             st.rerun()
 
 elif st.session_state.aba_ativa == "Financeiro":
-    st.subheader("Resumo Financeiro e Banco")
     salario_base = st.session_state.v_hora * 220
     bruto_ex = total_h_pagas * (st.session_state.v_hora * 2.1)
     imp_b = calcular_impostos(salario_base)
@@ -173,40 +175,36 @@ elif st.session_state.aba_ativa == "Financeiro":
     liq_ex = bruto_ex - (imp_t - imp_b)
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Saldo de Horas", f"{saldo_folgas:.2f}h")
+    c1.metric("Saldo Folgas", f"{saldo_folgas:.2f}h")
     c2.metric("Horas em R$", f"{total_h_pagas:.2f}h")
     c3.metric("Líquido Extra", f"R$ {liq_ex:,.2f}")
 
     st.divider()
-    st.dataframe(df_user[["data", "entrada", "saida", "tipo", "horas"]], use_container_width=True)
+    st.subheader("Auditoria de Lançamentos")
+    st.table(pd.DataFrame(analise_lista))
+    
     if st.button("🚨 ZERAR CICLO", type="primary"):
         salvar_dados("Lancamentos", df_todos[df_todos['usuario'] != st.session_state.usuario])
         st.rerun()
 
 elif st.session_state.aba_ativa == "Configurações":
-    st.subheader("Configurações do Perfil")
-    
-    with st.form("f_config"):
-        v_h = st.number_input("Valor da sua Hora (R$):", min_value=0.0, value=st.session_state.v_hora)
-        if st.form_submit_button("Salvar Valor da Hora"):
+    with st.form("f_conf"):
+        v_h = st.number_input("Valor da Hora (R$)", value=st.session_state.v_hora)
+        if st.form_submit_button("Salvar Valor"):
             df_u = buscar_dados("Usuarios")
-            idx = df_u[df_u['usuario'] == st.session_state.usuario].index
-            df_u.loc[idx, 'valor_hora'] = v_h
+            df_u.loc[df_u['usuario'] == st.session_state.usuario, 'valor_hora'] = v_h
             salvar_dados("Usuarios", df_u)
             st.session_state.v_hora = v_h
-            st.success("Valor atualizado!")
+            st.success("Atualizado!")
             st.rerun()
-    
-    st.divider()
-    with st.expander("Alterar Senha"):
-        with st.form("f_senha"):
-            p_a = st.text_input("Senha Atual", type="password")
-            p_n = st.text_input("Nova Senha", type="password")
-            if st.form_submit_button("Atualizar Senha"):
+    with st.expander("Trocar Senha"):
+        with st.form("f_pass"):
+            pa, pn = st.text_input("Atual", type="password"), st.text_input("Nova", type="password")
+            if st.form_submit_button("Mudar"):
                 df_u = buscar_dados("Usuarios")
                 idx = df_u[df_u['usuario'] == st.session_state.usuario].index
-                if str(df_u.loc[idx, 'senha'].values[0]) == p_a:
-                    df_u.loc[idx, 'senha'] = p_n
+                if str(df_u.loc[idx, 'senha'].values[0]) == pa:
+                    df_u.loc[idx, 'senha'] = pn
                     salvar_dados("Usuarios", df_u)
                     st.success("Senha alterada!")
-                else: st.error("Senha incorreta.")
+                else: st.error("Incorreta")
