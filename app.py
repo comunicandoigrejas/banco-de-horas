@@ -3,9 +3,10 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime, time
 
-# --- CONFIGURAÇÃO ---
+# --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Banco de Horas e Extras", layout="centered")
 
+# CSS para esconder o header do Streamlit (GitHub e Menu)
 st.markdown("""
     <style>
     #MainMenu {visibility: hidden;}
@@ -23,7 +24,7 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 def buscar_dados(aba):
     df = conn.read(worksheet=aba, ttl=0)
     if aba == "Lancamentos":
-        # Limpeza para evitar erros de leitura
+        # Limpeza de dados para evitar erros de cálculo
         df['horas'] = df['horas'].astype(str).str.replace(',', '.')
         df['horas'] = pd.to_numeric(df['horas'], errors='coerce').fillna(0.0)
         df['tipo_limpo'] = df['tipo'].astype(str).str.strip().str.lower()
@@ -55,7 +56,7 @@ def calcular_impostos(valor_bruto):
     elif base_ir > 2259.20: ir = (base_ir * 0.075) - 169.44
     return inss + max(0, ir)
 
-# --- LOGIN ---
+# --- SISTEMA DE LOGIN ---
 if 'logado' not in st.session_state: st.session_state.logado = False
 if 'aba_ativa' not in st.session_state: st.session_state.aba_ativa = "Créditos"
 
@@ -74,15 +75,16 @@ if not st.session_state.logado:
             else: st.error("Acesso Negado")
     st.stop()
 
-# --- HEADER ---
+# --- HEADER CENTRAL ---
 c_h1, c_h2 = st.columns([4, 1])
 c_h1.subheader(f"👤 {st.session_state.nome}")
 if c_h2.button("Sair"):
     st.session_state.logado = False
     st.rerun()
 
-# --- NAVEGAÇÃO ---
 st.title("Banco de Horas e Extras")
+
+# --- NAVEGAÇÃO ---
 c_nav1, c_nav2, c_nav3, c_nav4 = st.columns(4)
 if c_nav1.button("➕ Créditos"): st.session_state.aba_ativa = "Créditos"
 if c_nav2.button("➖ Folgas"): st.session_state.aba_ativa = "Folgas"
@@ -90,21 +92,21 @@ if c_nav3.button("💰 Financeiro"): st.session_state.aba_ativa = "Financeiro"
 if c_nav4.button("⚙️ Configurações"): st.session_state.aba_ativa = "Configurações"
 st.divider()
 
-# --- PROCESSAMENTO ---
+# --- PROCESSAMENTO DE DADOS ---
 df_todos = buscar_dados("Lancamentos")
-# Diagnóstico: Pega tudo do usuário antes de filtrar a data
 df_user_raw = df_todos[df_todos['usuario'] == st.session_state.usuario].copy()
 
+# Inicialização preventiva para evitar NameError
 saldo_folgas, total_h_pagas, cota_vida = 0.0, 0.0, 0.0
-historico_final = []
+df_valid = pd.DataFrame()
+df_invalid = pd.DataFrame()
 
 if not df_user_raw.empty:
+    # Tenta ler as datas. errors='coerce' transforma erros em NaT (Not a Time)
     df_user_raw['data_dt'] = pd.to_datetime(df_user_raw['data'], dayfirst=True, errors='coerce')
     
-    # Linhas para exibir (só as com data válida)
+    # Separa o que é válido do que é inválido
     df_valid = df_user_raw.dropna(subset=['data_dt']).sort_values('data_dt')
-    
-    # Linhas com erro (para diagnóstico)
     df_invalid = df_user_raw[df_user_raw['data_dt'].isna()]
 
     for _, row in df_valid.iterrows():
@@ -120,8 +122,6 @@ if not df_user_raw.empty:
                 total_h_pagas += h
         elif row['tipo_limpo'] == "debito":
             saldo_folgas -= h
-    
-    historico_final = df_valid[["data", "entrada", "saida", "tipo", "horas"]]
 
 # --- TELAS ---
 
@@ -136,10 +136,33 @@ if st.session_state.aba_ativa == "Créditos":
             delta = (datetime.combine(d, sai) - datetime.combine(d, ent)).total_seconds() / 3600
             if alm: delta -= 1
             mult = 1.5 if d.weekday() == 5 else 1.25
+            # Regra de limite de 2h para dias de semana
             h_calc = min(delta * mult, 2.0) if d.weekday() <= 4 else delta * mult
+            
             novo = pd.DataFrame([{"usuario": st.session_state.usuario, "data": d.strftime("%d/%m/%Y"), 
                                   "entrada": ent.strftime("%H:%M"), "saida": sai.strftime("%H:%M"), 
                                   "tipo": "Crédito", "horas": h_calc}])
+            salvar_dados("Lancamentos", pd.concat([df_todos, novo], ignore_index=True))
+            st.rerun()
+
+elif st.session_state.aba_ativa == "Folgas":
+    st.write(f"Saldo disponível: **{saldo_folgas:.2f}h**")
+    modo = st.radio("Tipo de Folga:", ["Dia Inteiro", "Parcial"])
+    with st.form("f_d"):
+        dn = st.date_input("Data")
+        hf, ev, sv = 0.0, "-", "-"
+        if modo == "Parcial":
+            col1, col2 = st.columns(2)
+            en, sn = col1.time_input("Início", value=time(8,0)), col2.time_input("Fim", value=time(12,0))
+            alm_f = st.checkbox("Descontar Almoço?")
+            ev, sv = en.strftime("%H:%M"), sn.strftime("%H:%M")
+        if st.form_submit_button("Confirmar Débito"):
+            if modo == "Dia Inteiro": hf = 9.0 if dn.weekday() <= 3 else 8.0
+            else: 
+                hf = (datetime.combine(dn, sn) - datetime.combine(dn, en)).total_seconds() / 3600
+                if alm_f: hf -= 1
+            novo = pd.DataFrame([{"usuario": st.session_state.usuario, "data": dn.strftime("%d/%m/%Y"), 
+                                  "entrada": ev, "saida": sv, "tipo": "Débito", "horas": hf}])
             salvar_dados("Lancamentos", pd.concat([df_todos, novo], ignore_index=True))
             st.rerun()
 
@@ -150,20 +173,22 @@ elif st.session_state.aba_ativa == "Financeiro":
     imp_t = calcular_impostos(salario_base + bruto_extras)
     liq_ex = bruto_extras - (imp_t - imp_b)
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Saldo Folgas", f"{saldo_folgas:.2f}h")
-    col2.metric("Horas em R$", f"{total_h_pagas:.2f}h")
-    col3.metric("Líquido Extras", f"R$ {liq_ex:,.2f}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Saldo Folgas", f"{saldo_folgas:.2f}h")
+    c2.metric("Horas em R$", f"{total_h_pagas:.2f}h")
+    c3.metric("Líquido Extras", f"R$ {liq_ex:,.2f}")
 
     st.divider()
     st.subheader("Histórico de Lançamentos")
-    st.dataframe(historico_final, use_container_width=True)
+    if not df_valid.empty:
+        st.dataframe(df_valid[["data", "entrada", "saida", "tipo", "horas"]], use_container_width=True)
+    else:
+        st.info("Nenhum lançamento válido encontrado.")
 
-    # SEÇÃO DE DIAGNÓSTICO
+    # Diagnóstico de erros na planilha
     if not df_invalid.empty:
-        st.error(f"⚠️ Atenção: Existem {len(df_invalid)} lançamentos na sua planilha que o aplicativo não conseguiu ler.")
-        with st.expander("Clique aqui para ver os erros"):
-            st.write("Verifique se as datas abaixo estão no formato DD/MM/AAAA:")
+        st.error(f"⚠️ Atenção: {len(df_invalid)} linhas da planilha não puderam ser lidas (Erro de Data).")
+        with st.expander("Ver linhas com erro"):
             st.table(df_invalid[["data", "tipo", "horas"]])
 
     if st.button("🚨 ZERAR CICLO", type="primary"):
@@ -178,15 +203,4 @@ elif st.session_state.aba_ativa == "Configurações":
             df_u.loc[df_u['usuario'] == st.session_state.usuario, 'valor_hora'] = v_h
             salvar_dados("Usuarios", df_u)
             st.session_state.v_hora = v_h
-            st.success("Atualizado!")
-    with st.expander("Trocar Senha"):
-        with st.form("f_pass"):
-            pa, pn = st.text_input("Senha Atual", type="password"), st.text_input("Nova Senha", type="password")
-            if st.form_submit_button("Mudar Senha"):
-                df_u = buscar_dados("Usuarios")
-                idx = df_u[df_u['usuario'] == st.session_state.usuario].index
-                if str(df_u.loc[idx, 'senha'].values[0]) == pa:
-                    df_u.loc[idx, 'senha'] = pn
-                    salvar_dados("Usuarios", df_u)
-                    st.success("Senha alterada!")
-                else: st.error("Senha atual incorreta")
+            st.success("Configuração salva!")
