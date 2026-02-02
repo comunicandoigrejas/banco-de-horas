@@ -3,7 +3,7 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime, time
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
+# --- CONFIGURAÇÃO DA PÁGINA E CSS ---
 st.set_page_config(page_title="Banco de Horas e Extras", layout="centered")
 
 # CSS para esconder o header do Streamlit (GitHub e Menu)
@@ -32,8 +32,11 @@ def buscar_dados(aba):
     return df
 
 def salvar_dados(aba, df_novo):
-    cols_to_drop = ['tipo_limpo', 'data_dt', 'h_banco', 'h_pago', 'cota_acum']
-    df_save = df_novo.drop(columns=[c for c in cols_to_drop if c in df_novo.columns])
+    df_save = df_novo.copy()
+    if aba == "Lancamentos":
+        cols_to_drop = ['tipo_limpo', 'data_dt', 'h_banco', 'h_pago', 'cota_acum']
+        df_save = df_save.drop(columns=[c for c in cols_to_drop if c in df_save.columns])
+    
     conn.update(worksheet=aba, data=df_save)
     st.cache_data.clear()
 
@@ -56,7 +59,7 @@ def calcular_impostos(valor_bruto):
     elif base_ir > 2259.20: ir = (base_ir * 0.075) - 169.44
     return inss + max(0, ir)
 
-# --- SISTEMA DE LOGIN ---
+# --- SISTEMA DE LOGIN E ESTADO ---
 if 'logado' not in st.session_state: st.session_state.logado = False
 if 'aba_ativa' not in st.session_state: st.session_state.aba_ativa = "Créditos"
 
@@ -75,7 +78,7 @@ if not st.session_state.logado:
             else: st.error("Acesso Negado")
     st.stop()
 
-# --- HEADER CENTRAL ---
+# --- HEADER ---
 c_h1, c_h2 = st.columns([4, 1])
 c_h1.subheader(f"👤 {st.session_state.nome}")
 if c_h2.button("Sair"):
@@ -94,22 +97,15 @@ st.divider()
 
 # --- PROCESSAMENTO DE DADOS ---
 df_todos = buscar_dados("Lancamentos")
-df_user_raw = df_todos[df_todos['usuario'] == st.session_state.usuario].copy()
+df_user = df_todos[df_todos['usuario'] == st.session_state.usuario].copy()
 
-# Inicialização preventiva para evitar NameError
 saldo_folgas, total_h_pagas, cota_vida = 0.0, 0.0, 0.0
-df_valid = pd.DataFrame()
-df_invalid = pd.DataFrame()
 
-if not df_user_raw.empty:
-    # Tenta ler as datas. errors='coerce' transforma erros em NaT (Not a Time)
-    df_user_raw['data_dt'] = pd.to_datetime(df_user_raw['data'], dayfirst=True, errors='coerce')
+if not df_user.empty:
+    df_user['data_dt'] = pd.to_datetime(df_user['data'], dayfirst=True, errors='coerce')
+    df_user = df_user.dropna(subset=['data_dt']).sort_values('data_dt')
     
-    # Separa o que é válido do que é inválido
-    df_valid = df_user_raw.dropna(subset=['data_dt']).sort_values('data_dt')
-    df_invalid = df_user_raw[df_user_raw['data_dt'].isna()]
-
-    for _, row in df_valid.iterrows():
+    for _, row in df_user.iterrows():
         h = float(row['horas'])
         if row['tipo_limpo'] == "credito":
             if cota_vida < 36:
@@ -136,9 +132,7 @@ if st.session_state.aba_ativa == "Créditos":
             delta = (datetime.combine(d, sai) - datetime.combine(d, ent)).total_seconds() / 3600
             if alm: delta -= 1
             mult = 1.5 if d.weekday() == 5 else 1.25
-            # Regra de limite de 2h para dias de semana
             h_calc = min(delta * mult, 2.0) if d.weekday() <= 4 else delta * mult
-            
             novo = pd.DataFrame([{"usuario": st.session_state.usuario, "data": d.strftime("%d/%m/%Y"), 
                                   "entrada": ent.strftime("%H:%M"), "saida": sai.strftime("%H:%M"), 
                                   "tipo": "Crédito", "horas": h_calc}])
@@ -151,9 +145,10 @@ elif st.session_state.aba_ativa == "Folgas":
     with st.form("f_d"):
         dn = st.date_input("Data")
         hf, ev, sv = 0.0, "-", "-"
+        alm_f = False
         if modo == "Parcial":
-            col1, col2 = st.columns(2)
-            en, sn = col1.time_input("Início", value=time(8,0)), col2.time_input("Fim", value=time(12,0))
+            c1, c2 = st.columns(2)
+            en, sn = c1.time_input("Início", value=time(8,0)), c2.time_input("Fim", value=time(12,0))
             alm_f = st.checkbox("Descontar Almoço?")
             ev, sv = en.strftime("%H:%M"), sn.strftime("%H:%M")
         if st.form_submit_button("Confirmar Débito"):
@@ -162,7 +157,7 @@ elif st.session_state.aba_ativa == "Folgas":
                 hf = (datetime.combine(dn, sn) - datetime.combine(dn, en)).total_seconds() / 3600
                 if alm_f: hf -= 1
             novo = pd.DataFrame([{"usuario": st.session_state.usuario, "data": dn.strftime("%d/%m/%Y"), 
-                                  "entrada": ev, "saida": sv, "tipo": "Débito", "horas": hf}])
+                                  "entrada": ev, "saida": sv, "tipo": "Débito", "horas": float(hf)}])
             salvar_dados("Lancamentos", pd.concat([df_todos, novo], ignore_index=True))
             st.rerun()
 
@@ -179,23 +174,40 @@ elif st.session_state.aba_ativa == "Financeiro":
     c3.metric("Líquido Extras", f"R$ {liq_ex:,.2f}")
 
     st.divider()
-    st.subheader("Histórico de Lançamentos")
-    if not df_valid.empty:
-        st.dataframe(df_valid[["data", "entrada", "saida", "tipo", "horas"]], use_container_width=True)
-    else:
-        st.info("Nenhum lançamento válido encontrado.")
+    st.subheader("Histórico e Manutenção")
+    if not df_user.empty:
+        st.dataframe(df_user[["data", "entrada", "saida", "tipo", "horas"]], use_container_width=True)
+        
+        # --- FUNÇÃO EDITAR ---
+        with st.expander("📝 Editar um Lançamento"):
+            opcoes_edit = {f"{r['data']} | {r['tipo']} | {r['horas']:.2f}h": i for i, r in df_user.iterrows()}
+            sel_edit = st.selectbox("Selecione o registro para alterar:", options=list(opcoes_edit.keys()))
+            idx_global = opcoes_edit[sel_edit]
+            
+            with st.form("form_edicao"):
+                ed_data = st.text_input("Data (DD/MM/AAAA)", value=df_todos.loc[idx_global, 'data'])
+                c1, c2 = st.columns(2)
+                ed_ent = c1.text_input("Entrada", value=df_todos.loc[idx_global, 'entrada'])
+                ed_sai = c2.text_input("Saída", value=df_todos.loc[idx_global, 'saida'])
+                ed_horas = st.number_input("Horas Calculadas", value=float(df_todos.loc[idx_global, 'horas']))
+                if st.form_submit_button("Salvar Alterações"):
+                    df_todos.at[idx_global, 'data'] = ed_data
+                    df_todos.at[idx_global, 'entrada'] = ed_ent
+                    df_todos.at[idx_global, 'saida'] = ed_sai
+                    df_todos.at[idx_global, 'horas'] = ed_horas
+                    salvar_dados("Lancamentos", df_todos)
+                    st.success("Registro atualizado!")
+                    st.rerun()
 
-    # Diagnóstico de erros na planilha
-    if not df_invalid.empty:
-        st.error(f"⚠️ Atenção: {len(df_invalid)} linhas da planilha não puderam ser lidas (Erro de Data).")
-        with st.expander("Ver linhas com erro"):
-            st.table(df_invalid[["data", "tipo", "horas"]])
-
-    if st.button("🚨 ZERAR CICLO", type="primary"):
-        salvar_dados("Lancamentos", df_todos[df_todos['usuario'] != st.session_state.usuario])
-        st.rerun()
+        st.divider()
+        if st.button("🚨 ZERAR TODO O CICLO", type="primary"):
+            # Filtra apenas os dados dos OUTROS usuários e salva, limpando os seus
+            df_zerado = df_todos[df_todos['usuario'] != st.session_state.usuario]
+            salvar_dados("Lancamentos", df_zerado)
+            st.rerun()
 
 elif st.session_state.aba_ativa == "Configurações":
+    st.subheader("Configurações do Perfil")
     with st.form("f_conf"):
         v_h = st.number_input("Valor da Hora (R$)", value=st.session_state.v_hora)
         if st.form_submit_button("Salvar Valor"):
@@ -203,4 +215,17 @@ elif st.session_state.aba_ativa == "Configurações":
             df_u.loc[df_u['usuario'] == st.session_state.usuario, 'valor_hora'] = v_h
             salvar_dados("Usuarios", df_u)
             st.session_state.v_hora = v_h
-            st.success("Configuração salva!")
+            st.success("Valor atualizado!")
+
+    st.divider()
+    with st.expander("🔐 Trocar Senha"):
+        with st.form("f_pass"):
+            pa, pn = st.text_input("Senha Atual", type="password"), st.text_input("Nova Senha", type="password")
+            if st.form_submit_button("Atualizar Senha"):
+                df_u = buscar_dados("Usuarios")
+                idx = df_u[df_u['usuario'] == st.session_state.usuario].index
+                if str(df_u.loc[idx, 'senha'].values[0]) == pa:
+                    df_u.loc[idx, 'senha'] = pn
+                    salvar_dados("Usuarios", df_u)
+                    st.success("Senha alterada com sucesso!")
+                else: st.error("Senha atual incorreta.")
