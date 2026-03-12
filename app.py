@@ -3,10 +3,9 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime, time
 
-# --- CONFIGURAÇÃO DA PÁGINA E INTERFACE ---
+# --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Banco de Horas e Extras", layout="centered")
 
-# CSS para ocultar menus do Streamlit e GitHub
 st.markdown("""
     <style>
     #MainMenu {visibility: hidden;}
@@ -19,13 +18,11 @@ st.markdown("""
 
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- FUNÇÕES NATIVAS DE DADOS ---
+# --- FUNÇÕES DE DADOS ---
 
 def buscar_dados(aba):
-    # ttl=0 força a leitura em tempo real sem usar memória antiga
     df = conn.read(worksheet=aba, ttl=0)
     if aba == "Lancamentos":
-        # Padroniza horas e tipos para evitar erros de soma
         df['horas'] = df['horas'].astype(str).str.replace(',', '.')
         df['horas'] = pd.to_numeric(df['horas'], errors='coerce').fillna(0.0)
         df['tipo_limpo'] = df['tipo'].astype(str).str.strip().str.lower()
@@ -33,15 +30,14 @@ def buscar_dados(aba):
     return df
 
 def salvar_dados(aba, df_novo):
-    # Prepara o dataframe removendo colunas de cálculos internos
     df_save = df_novo.copy()
     if aba == "Lancamentos":
         cols_drop = ['tipo_limpo', 'data_dt', 'h_banco', 'h_pago', 'cota_acum']
         df_save = df_save.drop(columns=[c for c in cols_drop if c in df_save.columns])
     
-    # Atualiza a planilha e limpa todo o cache para refletir a mudança imediata
     conn.update(worksheet=aba, data=df_save)
     st.cache_data.clear()
+    st.cache_resource.clear()
 
 def calcular_impostos(valor_bruto):
     inss = 0
@@ -62,7 +58,7 @@ def calcular_impostos(valor_bruto):
     elif base_ir > 2259.20: ir = (base_ir * 0.075) - 169.44
     return inss + max(0, ir)
 
-# --- SISTEMA DE LOGIN E ESTADO ---
+# --- LOGIN E NAVEGAÇÃO ---
 if 'logado' not in st.session_state: st.session_state.logado = False
 if 'aba_ativa' not in st.session_state: st.session_state.aba_ativa = "Créditos"
 
@@ -90,7 +86,6 @@ if c_h2.button("Sair"):
 
 st.title("Banco de Horas e Extras")
 
-# --- NAVEGAÇÃO PERSISTENTE ---
 c_nav1, c_nav2, c_nav3, c_nav4 = st.columns(4)
 if c_nav1.button("➕ Créditos"): st.session_state.aba_ativa = "Créditos"
 if c_nav2.button("➖ Folgas"): st.session_state.aba_ativa = "Folgas"
@@ -98,9 +93,8 @@ if c_nav3.button("💰 Financeiro"): st.session_state.aba_ativa = "Financeiro"
 if c_nav4.button("⚙️ Configurações"): st.session_state.aba_ativa = "Configurações"
 st.divider()
 
-# --- PROCESSAMENTO LOGICO (36H E TRANSBORDO) ---
+# --- PROCESSAMENTO LOGICO ---
 df_todos = buscar_dados("Lancamentos")
-# Filtramos mantendo o Index original para a edição funcionar
 df_user = df_todos[df_todos['usuario'] == st.session_state.usuario].copy()
 
 saldo_folgas, total_h_pagas, cota_vida = 0.0, 0.0, 0.0
@@ -127,18 +121,31 @@ if not df_user.empty:
 
 if st.session_state.aba_ativa == "Créditos":
     st.write(f"Cota Utilizada: **{min(36.0, cota_vida):.2f} / 36.00h**")
-    st.progress(min(1.0, cota_vida / 36))
     with st.form("f_c"):
         d = st.date_input("Data")
         c1, c2 = st.columns(2)
-        ent, sai = c1.time_input("Entrada", value=time(8,0)), c2.time_input("Saída", value=time(17,0))
-        alm = st.checkbox("Descontar Almoço (1h)?", value=True)
+        ent, sai = c1.time_input("Entrada", value=time(7,0)), c2.time_input("Saída", value=time(17,0))
+        alm = st.checkbox("Descontar 1h de Almoço?", value=True)
         if st.form_submit_button("Lançar Crédito"):
-            delta = (datetime.combine(d, sai) - datetime.combine(d, ent)).total_seconds() / 3600
-            if alm: delta -= 1
-            mult = 1.5 if d.weekday() == 5 else 1.25
-            # Regra de limite 2h em dias úteis
-            h_calc = min(delta * mult, 2.0) if d.weekday() <= 4 else delta * mult
+            total_trabalhado = (datetime.combine(d, sai) - datetime.combine(d, ent)).total_seconds() / 3600
+            if alm: total_trabalhado -= 1
+            
+            # --- NOVA LÓGICA DE JORNADA VARIÁVEL ---
+            # d.weekday() 0=Seg, 1=Ter, 2=Qua, 3=Qui, 4=Sex, 5=Sab
+            if d.weekday() <= 3: # Segunda a Quinta (9h úteis)
+                jornada_padrao = 9.0 if alm else 10.0
+                mult = 1.25
+            elif d.weekday() == 4: # Sexta (8h úteis)
+                jornada_padrao = 8.0 if alm else 9.0
+                mult = 1.25
+            else: # Sábado ou Domingo
+                jornada_padrao = 0.0
+                mult = 1.5
+            
+            excedente = max(0, total_trabalhado - jornada_padrao)
+            # Limite de 2h para dias de semana
+            h_calc = min(excedente * mult, 2.0) if d.weekday() <= 4 else excedente * mult
+            
             novo = pd.DataFrame([{"usuario": st.session_state.usuario, "data": d.strftime("%d/%m/%Y"), 
                                   "entrada": ent.strftime("%H:%M"), "saida": sai.strftime("%H:%M"), 
                                   "tipo": "Crédito", "horas": h_calc}])
@@ -154,11 +161,16 @@ elif st.session_state.aba_ativa == "Folgas":
         alm_f = False
         if modo == "Parcial":
             c1, c2 = st.columns(2)
-            en, sn = c1.time_input("Início", value=time(8,0)), c2.time_input("Fim", value=time(12,0))
+            en, sn = c1.time_input("Início", value=time(7,0)), c2.time_input("Fim", value=time(12,0))
             alm_f = st.checkbox("Descontar Almoço na Folga?")
             ev, sv = en.strftime("%H:%M"), sn.strftime("%H:%M")
         if st.form_submit_button("Confirmar Débito"):
-            if modo == "Dia Inteiro": hf = 9.0 if dn.weekday() <= 3 else 8.0
+            if modo == "Dia Inteiro":
+                # Ajusta o desconto da folga inteira conforme o dia
+                if dn.weekday() <= 3: hf = 9.0 # Seg a Qui
+                elif dn.weekday() == 4: hf = 8.0 # Sex
+                else: hf = 8.0 # Finais de semana padrão
+                ev, sv = "Folga", "Integral"
             else: 
                 hf = (datetime.combine(dn, sn) - datetime.combine(dn, en)).total_seconds() / 3600
                 if alm_f: hf -= 1
@@ -169,10 +181,10 @@ elif st.session_state.aba_ativa == "Folgas":
 
 elif st.session_state.aba_ativa == "Financeiro":
     salario_base = st.session_state.v_hora * 220
-    bruto_extras = total_h_pagas * (st.session_state.v_hora * 2.1)
+    bruto_ex = total_h_pagas * (st.session_state.v_hora * 2.1)
     imp_b = calcular_impostos(salario_base)
-    imp_t = calcular_impostos(salario_base + bruto_extras)
-    liq_ex = bruto_extras - (imp_t - imp_b)
+    imp_t = calcular_impostos(salario_base + bruto_ex)
+    liq_ex = bruto_ex - (imp_t - imp_b)
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Saldo Folgas", f"{saldo_folgas:.2f}h")
@@ -181,19 +193,17 @@ elif st.session_state.aba_ativa == "Financeiro":
 
     st.divider()
     if not df_user.empty:
-        st.subheader("Extrato")
         st.dataframe(df_user[["data", "entrada", "saida", "tipo", "horas"]], use_container_width=True)
         
-        # --- FUNÇÃO EDITAR (Sincronizada com o Index Real) ---
-        with st.expander("📝 Editar Lançamento"):
+        with st.expander("📝 Editar um Registro"):
             ops = {f"{r['data']} | {r['tipo']} | {r['horas']:.2f}h": i for i, r in df_user.iterrows()}
-            item_sel = st.selectbox("Selecione o registro para alterar:", options=list(ops.keys()))
+            item_sel = st.selectbox("Selecione para editar:", options=list(ops.keys()))
             idx_real = ops[item_sel]
-            
-            with st.form("f_edit"):
+            with st.form("f_ed"):
                 ed_d = st.text_input("Data", value=df_todos.at[idx_real, 'data'])
                 c1, c2 = st.columns(2)
-                ed_e, ed_s = c1.text_input("Entrada", value=df_todos.at[idx_real, 'entrada']), c2.text_input("Saída", value=df_todos.at[idx_real, 'saida'])
+                ed_e = c1.text_input("Entrada", value=df_todos.at[idx_real, 'entrada'])
+                ed_s = c2.text_input("Saída", value=df_todos.at[idx_real, 'saida'])
                 ed_h = st.number_input("Horas", value=float(df_todos.at[idx_real, 'horas']))
                 if st.form_submit_button("Salvar Alteração"):
                     df_todos.at[idx_real, 'data'] = ed_d
@@ -201,15 +211,13 @@ elif st.session_state.aba_ativa == "Financeiro":
                     df_todos.at[idx_real, 'saida'] = ed_s
                     df_todos.at[idx_real, 'horas'] = ed_h
                     salvar_dados("Lancamentos", df_todos)
-                    st.success("Alterado!")
+                    st.success("Atualizado!")
                     st.rerun()
 
         st.divider()
-        # --- ZERAR (Sincronizado e com Limpeza de Cache) ---
-        if st.button("🚨 ZERAR TODO O CICLO", type="primary"):
+        if st.button("🚨 ZERAR MEU CICLO", type="primary"):
             df_final = df_todos[df_todos['usuario'] != st.session_state.usuario]
             salvar_dados("Lancamentos", df_final)
-            st.success("Ciclo zerado!")
             st.rerun()
 
 elif st.session_state.aba_ativa == "Configurações":
@@ -221,17 +229,17 @@ elif st.session_state.aba_ativa == "Configurações":
             df_u.loc[df_u['usuario'] == st.session_state.usuario, 'valor_hora'] = v_nov
             salvar_dados("Usuarios", df_u)
             st.session_state.v_hora = v_nov
-            st.success("Valor atualizado!")
+            st.success("Salvo!")
 
     st.divider()
     with st.expander("🔐 Trocar Senha"):
         with st.form("f_p"):
             pa, pn = st.text_input("Senha Atual", type="password"), st.text_input("Nova Senha", type="password")
-            if st.form_submit_button("Atualizar"):
+            if st.form_submit_button("Atualizar Senha"):
                 df_u = buscar_dados("Usuarios")
                 idx_u = df_u[df_u['usuario'] == st.session_state.usuario].index
                 if str(df_u.loc[idx_u, 'senha'].values[0]) == pa:
                     df_u.loc[idx_u, 'senha'] = pn
                     salvar_dados("Usuarios", df_u)
-                    st.success("Senha trocada!")
+                    st.success("Senha alterada!")
                 else: st.error("Senha atual incorreta.")
